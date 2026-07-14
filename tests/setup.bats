@@ -433,3 +433,51 @@ cf_real_ip_env() {
   [[ "$output" == *"Value is required"* ]]
   [[ "$output" == *"filled-in"* ]]
 }
+
+# ---------------------------------------------------------------------------
+# generate_uuid / print_inbound_json
+# ---------------------------------------------------------------------------
+
+@test "generate_uuid produces a valid v4-shaped UUID" {
+  run generate_uuid
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]]
+}
+
+@test "print_inbound_json emits valid JSON for both WS and gRPC inbounds" {
+  WS_PORT="54740"
+  GRPC_PORT="58921"
+  WS_PATH="/api/v1/events"
+  GRPC_SERVICE="api.v1.SyncService"
+  VLESS_SUBDOMAIN="vpn"
+  BASE_DOMAIN="example.com"
+
+  run print_inbound_json
+  [ "$status" -eq 0 ]
+
+  [[ "$output" == *"\"port\": 54740"* ]]
+  [[ "$output" == *"\"port\": 58921"* ]]
+  [[ "$output" == *"\"path\": \"/api/v1/events\""* ]]
+  [[ "$output" == *"\"serviceName\": \"api.v1.SyncService\""* ]]
+  [[ "$output" == *"\"security\": \"none\""* ]]
+  [[ "$output" == *"vless://"* ]]
+  [[ "$output" == *"@vpn.example.com:443"* ]]
+}
+
+@test "print_inbound_json uses the same client UUID across both inbounds and both URIs" {
+  WS_PORT="54740"
+  GRPC_PORT="58921"
+  WS_PATH="/api/v1/events"
+  GRPC_SERVICE="api.v1.SyncService"
+  VLESS_SUBDOMAIN="vpn"
+  BASE_DOMAIN="example.com"
+
+  run print_inbound_json
+  [ "$status" -eq 0 ]
+
+  unique_uuid_count=$(printf '%s\n' "$output" \
+    | grep -oE '[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}' \
+    | sort -u | wc -l | tr -d ' ')
+
+  [ "$unique_uuid_count" = "1" ]
+}

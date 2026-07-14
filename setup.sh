@@ -695,6 +695,106 @@ print_summary() {
   echo "  ss -lntp | egrep ':443|:${PANEL_PORT}|:${WS_PORT}|:${GRPC_PORT}'"
 }
 
+generate_uuid() {
+  if [[ -r /proc/sys/kernel/random/uuid ]]; then
+    cat /proc/sys/kernel/random/uuid
+  elif command -v uuidgen >/dev/null 2>&1; then
+    uuidgen | tr '[:upper:]' '[:lower:]'
+  elif command -v python3 >/dev/null 2>&1; then
+    python3 -c 'import uuid; print(uuid.uuid4())'
+  else
+    die "No UUID generator available (need /proc/sys/kernel/random/uuid, uuidgen, or python3)."
+  fi
+}
+
+print_inbound_json() {
+  local client_uuid
+  client_uuid="$(generate_uuid)"
+
+  echo
+  echo "=== Xray inbound JSON (copy-paste into 3x-ui) ==="
+  echo
+  echo "Client UUID generated for you: ${client_uuid}"
+  echo "(3x-ui's 'Add Inbound' form does not accept raw JSON in all versions --"
+  echo " use these as a field-by-field reference, or via 'Import' if your"
+  echo " version supports it. Security must stay 'none': TLS is terminated by"
+  echo " Nginx, not Xray.)"
+  echo
+  echo "--- WebSocket inbound ---"
+  cat <<EOF
+{
+  "listen": "127.0.0.1",
+  "port": ${WS_PORT},
+  "protocol": "vless",
+  "tag": "in-${WS_PORT}-ws",
+  "settings": {
+    "clients": [
+      {
+        "id": "${client_uuid}",
+        "email": "client-ws"
+      }
+    ],
+    "decryption": "none"
+  },
+  "sniffing": {
+    "enabled": true,
+    "destOverride": ["http", "tls"],
+    "metadataOnly": false,
+    "routeOnly": true
+  },
+  "streamSettings": {
+    "network": "ws",
+    "security": "none",
+    "wsSettings": {
+      "acceptProxyProtocol": false,
+      "path": "${WS_PATH}",
+      "host": "",
+      "headers": {}
+    }
+  }
+}
+EOF
+
+  echo
+  echo "--- gRPC inbound ---"
+  cat <<EOF
+{
+  "listen": "127.0.0.1",
+  "port": ${GRPC_PORT},
+  "protocol": "vless",
+  "tag": "in-${GRPC_PORT}-grpc",
+  "settings": {
+    "clients": [
+      {
+        "id": "${client_uuid}",
+        "email": "client-grpc"
+      }
+    ],
+    "decryption": "none"
+  },
+  "sniffing": {
+    "enabled": true,
+    "destOverride": ["http", "tls"],
+    "metadataOnly": false,
+    "routeOnly": true
+  },
+  "streamSettings": {
+    "network": "grpc",
+    "security": "none",
+    "grpcSettings": {
+      "serviceName": "${GRPC_SERVICE}",
+      "multiMode": false
+    }
+  }
+}
+EOF
+
+  echo
+  echo "--- Client VLESS URIs (same UUID, ready to import into your client app) ---"
+  echo "vless://${client_uuid}@${VLESS_SUBDOMAIN}.${BASE_DOMAIN}:443?type=ws&security=tls&path=$(printf '%s' "$WS_PATH" | sed 's#/#%2F#g')&host=${VLESS_SUBDOMAIN}.${BASE_DOMAIN}#WS-client"
+  echo "vless://${client_uuid}@${VLESS_SUBDOMAIN}.${BASE_DOMAIN}:443?type=grpc&security=tls&serviceName=${GRPC_SERVICE}&mode=gun#gRPC-client"
+}
+
 verify_deployment() {
   local panel_domain="${PANEL_SUBDOMAIN}.${BASE_DOMAIN}"
   local vless_domain="${VLESS_SUBDOMAIN}.${BASE_DOMAIN}"
@@ -786,6 +886,7 @@ main() {
   write_nginx_config
   configure_ufw
   print_summary
+  print_inbound_json
   verify_deployment
 }
 
