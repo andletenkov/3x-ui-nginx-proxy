@@ -319,7 +319,7 @@ collect_input() {
   echo
   prompt WS_PATH "WebSocket path" "$WS_PATH"
   prompt GRPC_SERVICE "gRPC service name" "$GRPC_SERVICE"
-  prompt SUB_PATH "Subscription path (appended to panel path, e.g. <panel-path>/sub)" "$SUB_PATH"
+  prompt SUB_PATH "Subscription path" "$SUB_PATH"
 
   if [[ -z "${CLOUDFLARE_API_TOKEN:-}" ]]; then
     echo
@@ -358,7 +358,7 @@ confirm_configuration() {
   echo "  serviceName: ${GRPC_SERVICE}"
   echo
   echo "Subscription:"
-  echo "  URL: https://${panel_domain}${PANEL_PATH}${SUB_PATH}/"
+  echo "  URL: https://${panel_domain}${SUB_PATH}/"
   echo "  internal port: ${SUB_PORT}"
   echo
   echo "Firewall:"
@@ -623,8 +623,8 @@ server {
         proxy_send_timeout 300s;
     }
 
-    location ${PANEL_PATH}${SUB_PATH}/ {
-        proxy_pass http://127.0.0.1:${SUB_PORT}${SUB_PATH}/;
+    location ${SUB_PATH}/ {
+        proxy_pass http://127.0.0.1:${SUB_PORT};
 
         proxy_http_version 1.1;
         proxy_set_header Host \$host;
@@ -759,7 +759,7 @@ print_summary() {
   echo "  serviceName: ${GRPC_SERVICE}"
   echo
   echo "Subscription:"
-  echo "  URL: https://${panel_domain}${PANEL_PATH}${SUB_PATH}/"
+  echo "  URL: https://${panel_domain}${SUB_PATH}/"
   echo "  internal port: ${SUB_PORT}"
   echo
   echo "UFW:"
@@ -893,7 +893,7 @@ verify_deployment() {
   echo
   echo "Now go configure 3x-ui / Xray to listen on:"
   echo "  Panel:  127.0.0.1:${PANEL_PORT}${PANEL_PATH}/"
-  echo "  Sub:    127.0.0.1:${SUB_PORT}, proxied at ${PANEL_PATH}${SUB_PATH}/"
+  echo "  Sub:    127.0.0.1:${SUB_PORT}, path ${SUB_PATH}/"
   echo "  WS:     127.0.0.1:${WS_PORT}, path ${WS_PATH}"
   echo "  gRPC:   127.0.0.1:${GRPC_PORT}, serviceName ${GRPC_SERVICE}"
   echo
