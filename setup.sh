@@ -316,6 +316,11 @@ confirm_configuration() {
 install_packages() {
   echo "[1/8] Installing packages..."
 
+  if [[ -d /etc/needrestart/conf.d ]]; then
+    # shellcheck disable=SC2016
+    echo '$nrconf{restart} = '\''a'\'';' > /etc/needrestart/conf.d/50-autorestart.conf
+  fi
+
   apt update
 
   apt install -y \
