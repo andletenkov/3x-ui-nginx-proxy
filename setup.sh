@@ -9,11 +9,13 @@ EMAIL=""
 SSH_PORT="22"
 
 PANEL_PORT="2053"
+SUB_PORT=""
 WS_PORT=""
 GRPC_PORT=""
 
 WS_PATH="/api/v1/events"
 GRPC_SERVICE="api.v1.SyncService"
+SUB_PATH="/sub"
 
 CERT_DIR=""
 CF_CREDENTIALS="/etc/letsencrypt/cloudflare.ini"
@@ -162,6 +164,20 @@ normalize_ws_path() {
     die "WebSocket path may only contain letters, numbers, '/', '_' and '-'."
 }
 
+normalize_sub_path() {
+  SUB_PATH="/${SUB_PATH#/}"
+
+  while [[ "$SUB_PATH" != "/" && "$SUB_PATH" == */ ]]; do
+    SUB_PATH="${SUB_PATH%/}"
+  done
+
+  [[ "$SUB_PATH" != "/" ]] ||
+    die "Subscription path cannot be /."
+
+  [[ "$SUB_PATH" =~ ^/[A-Za-z0-9/_-]*$ ]] ||
+    die "Subscription path may only contain letters, numbers, '/', '_' and '-'."
+}
+
 validate_inputs() {
   [[ "$BASE_DOMAIN" =~ ^([A-Za-z0-9-]+\.)+[A-Za-z]{2,}$ ]] ||
     die "Invalid base domain."
@@ -183,6 +199,7 @@ validate_inputs() {
 
   validate_port "SSH port" "$SSH_PORT"
   validate_port "Panel port" "$PANEL_PORT"
+  validate_port "Subscription port" "$SUB_PORT"
   validate_port "WebSocket port" "$WS_PORT"
   validate_port "gRPC port" "$GRPC_PORT"
 
@@ -195,6 +212,15 @@ validate_inputs() {
   [[ "$PANEL_PORT" != "$GRPC_PORT" ]] ||
     die "Panel and gRPC ports must be different."
 
+  [[ "$PANEL_PORT" != "$SUB_PORT" ]] ||
+    die "Panel and Subscription ports must be different."
+
+  [[ "$SUB_PORT" != "$WS_PORT" ]] ||
+    die "Subscription and WebSocket ports must be different."
+
+  [[ "$SUB_PORT" != "$GRPC_PORT" ]] ||
+    die "Subscription and gRPC ports must be different."
+
   [[ "$WS_PORT" != "$GRPC_PORT" ]] ||
     die "WebSocket and gRPC ports must be different."
 
@@ -202,6 +228,7 @@ validate_inputs() {
   local internal_port_name
   for internal_port_name_port in \
     "Panel port:$PANEL_PORT" \
+    "Subscription port:$SUB_PORT" \
     "WebSocket port:$WS_PORT" \
     "gRPC port:$GRPC_PORT"
   do
@@ -217,6 +244,7 @@ validate_inputs() {
 
   normalize_panel_path
   normalize_ws_path
+  normalize_sub_path
 }
 
 collect_input() {
@@ -239,7 +267,10 @@ collect_input() {
 
   validate_port "Panel port" "$PANEL_PORT"
 
-  default_ws_port="$(random_free_port "$PANEL_PORT")"
+  prompt SUB_PORT "Subscription local port" "2096"
+  validate_port "Subscription port" "$SUB_PORT"
+
+  default_ws_port="$(random_free_port "$PANEL_PORT" "$SUB_PORT")"
   default_grpc_port="$(random_free_port "$PANEL_PORT" "$default_ws_port")"
 
   prompt WS_PORT "WebSocket local port" "$default_ws_port"
@@ -259,6 +290,7 @@ collect_input() {
   echo
   prompt WS_PATH "WebSocket path" "$WS_PATH"
   prompt GRPC_SERVICE "gRPC service name" "$GRPC_SERVICE"
+  prompt SUB_PATH "Subscription path" "$SUB_PATH"
 
   if [[ -z "${CLOUDFLARE_API_TOKEN:-}" ]]; then
     echo
@@ -296,9 +328,13 @@ confirm_configuration() {
   echo "  internal Xray port: ${GRPC_PORT}"
   echo "  serviceName: ${GRPC_SERVICE}"
   echo
+  echo "Subscription:"
+  echo "  URL: https://${panel_domain}${PANEL_PATH}${SUB_PATH}/"
+  echo "  internal port: ${SUB_PORT}"
+  echo
   echo "Firewall:"
   echo "  allowed: ${SSH_PORT}/tcp, 443/tcp"
-  echo "  denied: 80/tcp, ${PANEL_PORT}/tcp, ${WS_PORT}/tcp, ${GRPC_PORT}/tcp"
+  echo "  denied: 80/tcp, ${PANEL_PORT}/tcp, ${SUB_PORT}/tcp, ${WS_PORT}/tcp, ${GRPC_PORT}/tcp"
   echo
 
   read -r -p "Continue? [y/N]: " answer
@@ -558,6 +594,19 @@ server {
         proxy_send_timeout 300s;
     }
 
+    location ${PANEL_PATH}${SUB_PATH}/ {
+        proxy_pass http://127.0.0.1:${SUB_PORT}/;
+
+        proxy_http_version 1.1;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;
+
+        proxy_read_timeout 300s;
+        proxy_send_timeout 300s;
+    }
+
     location / {
         return 404;
     }
@@ -608,6 +657,7 @@ configure_ufw() {
   echo "[7/8] Configuring UFW..."
 
   local prev_panel_port=""
+  local prev_sub_port=""
   local prev_ws_port=""
   local prev_grpc_port=""
 
@@ -615,14 +665,16 @@ configure_ufw() {
     # shellcheck disable=SC1090
     source "$STATE_FILE"
     prev_panel_port="${STATE_PANEL_PORT:-}"
+    prev_sub_port="${STATE_SUB_PORT:-}"
     prev_ws_port="${STATE_WS_PORT:-}"
     prev_grpc_port="${STATE_GRPC_PORT:-}"
   fi
 
   # Remove stale deny rules left over from a previous run with different ports.
-  for stale_port in "$prev_panel_port" "$prev_ws_port" "$prev_grpc_port"; do
+  for stale_port in "$prev_panel_port" "$prev_sub_port" "$prev_ws_port" "$prev_grpc_port"; do
     if [[ -n "$stale_port" ]] &&
        [[ "$stale_port" != "$PANEL_PORT" ]] &&
+       [[ "$stale_port" != "$SUB_PORT" ]] &&
        [[ "$stale_port" != "$WS_PORT" ]] &&
        [[ "$stale_port" != "$GRPC_PORT" ]]; then
       ufw delete deny "${stale_port}/tcp" || true
@@ -634,6 +686,7 @@ configure_ufw() {
 
   ufw deny 80/tcp || true
   ufw deny "${PANEL_PORT}/tcp" || true
+  ufw deny "${SUB_PORT}/tcp" || true
   ufw deny "${WS_PORT}/tcp" || true
   ufw deny "${GRPC_PORT}/tcp" || true
 
@@ -642,6 +695,7 @@ configure_ufw() {
 
   cat > "$STATE_FILE" <<EOF
 STATE_PANEL_PORT=${PANEL_PORT}
+STATE_SUB_PORT=${SUB_PORT}
 STATE_WS_PORT=${WS_PORT}
 STATE_GRPC_PORT=${GRPC_PORT}
 EOF
@@ -675,9 +729,13 @@ print_summary() {
   echo "  network: grpc"
   echo "  serviceName: ${GRPC_SERVICE}"
   echo
+  echo "Subscription:"
+  echo "  URL: https://${panel_domain}${PANEL_PATH}${SUB_PATH}/"
+  echo "  internal port: ${SUB_PORT}"
+  echo
   echo "UFW:"
   echo "  allowed: ${SSH_PORT}/tcp, 443/tcp"
-  echo "  denied: 80/tcp, ${PANEL_PORT}/tcp, ${WS_PORT}/tcp, ${GRPC_PORT}/tcp"
+  echo "  denied: 80/tcp, ${PANEL_PORT}/tcp, ${SUB_PORT}/tcp, ${WS_PORT}/tcp, ${GRPC_PORT}/tcp"
   echo "  22/tcp was NOT opened unless you selected port 22."
   echo
   echo "Files:"
@@ -692,7 +750,7 @@ print_summary() {
   echo "  systemctl status certbot.timer"
   echo "  certbot renew --dry-run"
   echo "  ufw status verbose"
-  echo "  ss -lntp | egrep ':443|:${PANEL_PORT}|:${WS_PORT}|:${GRPC_PORT}'"
+  echo "  ss -lntp | egrep ':443|:${PANEL_PORT}|:${SUB_PORT}|:${WS_PORT}|:${GRPC_PORT}'"
 }
 
 generate_uuid() {
@@ -806,6 +864,7 @@ verify_deployment() {
   echo
   echo "Now go configure 3x-ui / Xray to listen on:"
   echo "  Panel:  127.0.0.1:${PANEL_PORT}${PANEL_PATH}/"
+  echo "  Sub:    127.0.0.1:${SUB_PORT}, proxied at ${PANEL_PATH}${SUB_PATH}/"
   echo "  WS:     127.0.0.1:${WS_PORT}, path ${WS_PATH}"
   echo "  gRPC:   127.0.0.1:${GRPC_PORT}, serviceName ${GRPC_SERVICE}"
   echo
@@ -819,7 +878,7 @@ verify_deployment() {
   echo
   echo "Checking local listeners..."
 
-  for check in "Panel:$PANEL_PORT" "WebSocket:$WS_PORT" "gRPC:$GRPC_PORT"; do
+  for check in "Panel:$PANEL_PORT" "Subscription:$SUB_PORT" "WebSocket:$WS_PORT" "gRPC:$GRPC_PORT"; do
     local check_name="${check%%:*}"
     local check_port="${check#*:}"
 
@@ -865,7 +924,7 @@ verify_deployment() {
   else
     echo "Some checks failed. Verify your 3x-ui/Xray configuration matches the ports/paths above,"
     echo "then re-run the checks manually:"
-    echo "  ss -lntp | egrep ':${PANEL_PORT}|:${WS_PORT}|:${GRPC_PORT}'"
+    echo "  ss -lntp | egrep ':${PANEL_PORT}|:${SUB_PORT}|:${WS_PORT}|:${GRPC_PORT}'"
     echo "  curl -vk https://${panel_domain}${PANEL_PATH}/"
     echo "  curl -vk https://${vless_domain}/"
   fi

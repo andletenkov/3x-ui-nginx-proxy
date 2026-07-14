@@ -116,10 +116,12 @@ valid_inputs() {
   EMAIL="user@example.com"
   SSH_PORT="22"
   PANEL_PORT="2053"
+  SUB_PORT="2096"
   WS_PORT="10001"
   GRPC_PORT="10002"
   WS_PATH="/api/v1/events"
   GRPC_SERVICE="api.v1.SyncService"
+  SUB_PATH="/sub"
 }
 
 @test "validate_inputs accepts a fully valid configuration" {
@@ -272,9 +274,11 @@ nginx_config_env() {
   PANEL_SUBDOMAIN="admin"
   VLESS_SUBDOMAIN="vpn"
   PANEL_PATH="/my-admin"
+  SUB_PATH="/sub"
   WS_PATH="/api/v1/events"
   GRPC_SERVICE="api.v1.SyncService"
   PANEL_PORT="2053"
+  SUB_PORT="2096"
   WS_PORT="10001"
   GRPC_PORT="10002"
   CERT_DIR="/tmp/fake-cert"
