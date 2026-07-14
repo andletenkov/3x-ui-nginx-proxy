@@ -53,7 +53,7 @@ Everything else on either domain returns `404`.
 ## Usage
 
 ```bash
-wget https://raw.githubusercontent.com/andletenkov/3x-ui-nginx-proxy/main/setup.sh && chmod +x setup.sh && sudo ./setup.sh
+wget -O setup.sh https://raw.githubusercontent.com/andletenkov/3x-ui-nginx-proxy/main/setup.sh && chmod +x setup.sh && sudo ./setup.sh
 ```
 
 You'll be prompted for the base domain, subdomains, panel path, email, SSH
