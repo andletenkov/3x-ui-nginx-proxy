@@ -98,6 +98,8 @@ fi
 : "${WS_PATH:?WS_PATH is required}"
 : "${GRPC_PORT:?GRPC_PORT is required}"
 : "${GRPC_SERVICE:?GRPC_SERVICE is required}"
+: "${SUB_PORT:?SUB_PORT is required}"
+: "${SUB_PATH:?SUB_PATH is required}"
 
 CLIENT_UUID="${CLIENT_UUID:-}"
 XUI_VERSION="${XUI_VERSION:-}"
@@ -328,6 +330,14 @@ print(json.dumps({
   xui_add_inbound "$GRPC_PORT" "$tag" "gRPC-inbound" "$stream_settings" "client-grpc"
 }
 
+configure_subscription() {
+  echo "Configuring subscription (port ${SUB_PORT}, path ${SUB_PATH})..." >&2
+  /usr/local/x-ui/x-ui setting -subPort "$SUB_PORT" -subPath "${SUB_PATH#/}" -subEnable true >&2 ||
+    die "Failed to configure subscription settings via x-ui CLI."
+  # Restart to apply the new sub settings
+  systemctl restart x-ui >&2 || true
+}
+
 main() {
   if xui_is_installed; then
     echo "3x-ui is already installed, skipping installer (reusing its existing credentials/port/path)." >&2
@@ -340,6 +350,7 @@ main() {
   setup_api_auth
   ensure_ws_inbound
   ensure_grpc_inbound
+  configure_subscription
 
   echo "Inbounds ready." >&2
 

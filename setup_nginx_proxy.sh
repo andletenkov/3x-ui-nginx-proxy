@@ -720,7 +720,7 @@ server {
     }
 
     location ${SUB_PATH}/ {
-        proxy_pass http://127.0.0.1:${SUB_PORT}/sub/;
+        proxy_pass http://127.0.0.1:${SUB_PORT};
 
         proxy_http_version 1.1;
         proxy_set_header Host \$host;
@@ -916,6 +916,8 @@ install_3xui_and_inbounds() {
     WS_PATH="$WS_PATH" \
     GRPC_PORT="$GRPC_PORT" \
     GRPC_SERVICE="$GRPC_SERVICE" \
+    SUB_PORT="$SUB_PORT" \
+    SUB_PATH="$SUB_PATH" \
     CLIENT_UUID="$CLIENT_UUID" \
     XUI_VERSION="${XUI_VERSION:-}" \
     "$installer_script"
