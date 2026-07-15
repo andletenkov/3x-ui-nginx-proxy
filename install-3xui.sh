@@ -465,14 +465,14 @@ else:
     reg_data = reg_obj
 
 # Extract credentials from the registration response
-# data.private_key is the SECRET key (what we passed in)
-# config.key is the PUBLIC key (registered with Cloudflare)
+# Structure: obj.config.config.peers/interface (nested), obj.data.private_key
 warp_private_key = reg_data['data']['private_key']
 client_id = reg_data['data'].get('client_id', '')
-peer_pub = reg_data['config']['peers'][0]['public_key']
-endpoint = reg_data['config']['peers'][0]['endpoint']['host']
-addr_v4 = reg_data['config']['interface']['addresses']['v4']
-addr_v6 = reg_data['config']['interface']['addresses']['v6']
+cfg = reg_data['config']['config']
+peer_pub = cfg['peers'][0]['public_key']
+endpoint = cfg['peers'][0]['endpoint']['host']
+addr_v4 = cfg['interface']['addresses']['v4']
+addr_v6 = cfg['interface']['addresses']['v6']
 
 reserved = list(base64.b64decode(client_id + '==')[:3]) if client_id else [0, 0, 0]
 
