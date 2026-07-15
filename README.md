@@ -112,21 +112,27 @@ Nginx/UFW/certs.
 
 | Variable | Default | Notes |
 |---|---|---|
-| `BASE_DOMAIN` | — | Required |
-| `PANEL_SUBDOMAIN` | `admin` | Must differ from `VLESS_SUBDOMAIN` |
-| `VLESS_SUBDOMAIN` | `vpn` | Must differ from `PANEL_SUBDOMAIN` |
-| `PANEL_PATH` | `/my-admin` | Letters/numbers/`/`/`_`/`-` only |
-| `EMAIL` | — | Let's Encrypt contact |
-| `SSH_PORT` | `22` | Can't be `443`; internal ports can't equal this |
-| `PANEL_PORT` | `2053` | Internal 3x-ui port |
-| `WS_PORT` | random | Internal Xray WS port |
-| `GRPC_PORT` | random | Internal Xray gRPC port |
-| `WS_PATH` | `/api/v1/events` | Same character rules as `PANEL_PATH` |
-| `GRPC_SERVICE` | `api.v1.SyncService` | `[A-Za-z0-9._-]+` |
+| `BASE_DOMAIN` | — | Required, prompted |
+| `PANEL_SUBDOMAIN` | `admin` | Prompted. Must differ from `VLESS_SUBDOMAIN` |
+| `VLESS_SUBDOMAIN` | `vpn` | Prompted. Must differ from `PANEL_SUBDOMAIN` |
+| `EMAIL` | — | Prompted. Let's Encrypt contact |
+| `SSH_PORT` | `22` | Prompted. Can't be `443`; internal ports can't equal this |
+| `SUB_PORT` | `2096` | Prompted. Internal subscription port |
+| `WS_PORT` | random | Prompted (defaults to a random free port). Internal Xray WS port |
+| `GRPC_PORT` | random | Prompted (defaults to a random free port). Internal Xray gRPC port |
+| `WS_PATH` | `/api/v1/events` | Prompted. Letters/numbers/`/`/`_`/`-` only |
+| `GRPC_SERVICE` | `api.v1.SyncService` | Prompted. `[A-Za-z0-9._-]+` |
+| `SUB_PATH` | `/sub` | Prompted |
 | `CLOUDFLARE_API_TOKEN` | — | Prompted (hidden) unless already exported |
+| `XUI_VERSION` | latest stable | Env var only (not prompted). 3x-ui release tag, e.g. `v3.4.0`, or `dev-latest`. Ignored if 3x-ui is already installed |
+| `PANEL_PORT` | random | **Not prompted.** Reserved by `setup_nginx_proxy.sh` itself (excluded from `SSH_PORT`/`443`/`SUB_PORT`/`WS_PORT`/`GRPC_PORT`) and handed to the 3x-ui installer as `XUI_PANEL_PORT` |
+| `PANEL_PATH` | random | **Not prompted.** Generated securely by the 3x-ui installer itself (`XUI_WEB_BASE_PATH`) |
+| 3x-ui username/password | random | **Not prompted or settable here.** Generated securely by the 3x-ui installer, printed at the end of the run |
 
-`PANEL_PORT`/`WS_PORT`/`GRPC_PORT` must all differ from each other, from
-`443`, and from `SSH_PORT`.
+`PANEL_PORT`/`SUB_PORT`/`WS_PORT`/`GRPC_PORT` must all differ from each
+other, from `443`, and from `SSH_PORT`. `PANEL_PORT` itself is only known
+after 3x-ui installs (see [Usage](#usage)) — `setup_nginx_proxy.sh`
+re-validates it doesn't collide with any of the above once reported back.
 
 ## Generated files
 
