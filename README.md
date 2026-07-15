@@ -113,6 +113,29 @@ pieces were never installed.
 (service, binary, `/etc/x-ui`, `/usr/local/x-ui`) without touching
 Nginx/UFW/certs.
 
+### WARP outbound and routing
+
+The install script automatically:
+
+1. **Registers a Cloudflare WARP account** via the 3x-ui panel API
+   (`/panel/api/xray/warp/del` → `/panel/api/xray/warp/reg`) — any
+   pre-existing WARP data is purged first so credentials are always fresh.
+2. **Builds a WireGuard outbound** (`tag: warp`) from the registration
+   response and injects it into the xray config alongside `direct` and
+   `blocked` outbounds.
+3. **Configures routing rules**:
+   - `geoip:ru` → warp
+   - `geosite:category-ru` + `regexp:.*\.ru$` + `geosite:openai` → warp
+   - `geoip:private` → blocked
+   - `bittorrent` → blocked
+4. **Tests the WARP outbound** via `/panel/api/xray/testOutbound` and
+   reports the result (delay, egress country, warp status).
+
+Geo files (`geoip.dat`, `geosite.dat`) are downloaded from
+[runetfreedom/russia-v2ray-rules-dat](https://github.com/runetfreedom/russia-v2ray-rules-dat)
+on fresh installs, which includes `category-ru` and other Russia-specific
+blocking/routing categories.
+
 ## Configuration reference
 
 | Variable | Default | Notes |
