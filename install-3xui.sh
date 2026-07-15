@@ -332,10 +332,47 @@ print(json.dumps({
 
 configure_subscription() {
   echo "Configuring subscription (port ${SUB_PORT}, path ${SUB_PATH})..." >&2
-  /usr/local/x-ui/x-ui setting -subPort "$SUB_PORT" -subPath "${SUB_PATH#/}" -subEnable true >&2 ||
-    die "Failed to configure subscription settings via x-ui CLI."
-  # Restart to apply the new sub settings
-  systemctl restart x-ui >&2 || true
+
+  # Fetch current settings, patch subscription fields, push back.
+  local current_settings
+  current_settings="$(api_curl -X POST "${BASE_URL}/panel/api/setting/all")"
+
+  local updated_settings
+  updated_settings="$(python3 -c "
+import json,sys
+
+resp = json.loads(sys.argv[1])
+if not resp.get('success'):
+    print('Failed to fetch current settings:', resp.get('msg',''), file=sys.stderr)
+    sys.exit(1)
+
+settings = resp.get('obj') or {}
+settings['subEnable'] = True
+settings['subPort'] = int(sys.argv[2])
+settings['subPath'] = sys.argv[3].lstrip('/')
+settings['subListen'] = '127.0.0.1'
+print(json.dumps(settings))
+" "$current_settings" "$SUB_PORT" "$SUB_PATH")" ||
+    die "Failed to prepare subscription settings."
+
+  local resp
+  resp="$(api_curl -X POST "${BASE_URL}/panel/api/setting/update" \
+    -H 'Content-Type: application/json' \
+    -d "$updated_settings")"
+
+  python3 -c "
+import json,sys
+try:
+    data = json.loads(sys.argv[1])
+    if not data.get('success'):
+        print('API error:', data.get('msg','unknown'), file=sys.stderr)
+        sys.exit(1)
+except Exception as e:
+    print('Failed to parse response:', e, file=sys.stderr)
+    sys.exit(1)
+" "$resp" || die "Failed to update subscription settings via API."
+
+  echo "Subscription configured." >&2
 }
 
 main() {
