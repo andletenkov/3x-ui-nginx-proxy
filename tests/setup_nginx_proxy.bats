@@ -532,8 +532,8 @@ cf_real_ip_env() {
   run print_client_links
   [ "$status" -eq 0 ]
 
-  [[ "$output" == *"vless://11111111-2222-3333-4444-555555555555@vpn.example.com:443?type=ws&security=tls&path=%2Fapi%2Fv1%2Fevents&host=vpn.example.com#WS-client"* ]]
-  [[ "$output" == *"vless://11111111-2222-3333-4444-555555555555@vpn.example.com:443?type=grpc&security=tls&serviceName=api.v1.SyncService&mode=gun&host=vpn.example.com#gRPC-client"* ]]
+  [[ "$output" == *"vless://11111111-2222-3333-4444-555555555555@vpn.example.com:443?type=ws&security=tls&path=%2Fapi%2Fv1%2Fevents&host=vpn.example.com#ws-cdn"* ]]
+  [[ "$output" == *"vless://11111111-2222-3333-4444-555555555555@vpn.example.com:443?type=grpc&security=tls&serviceName=api.v1.SyncService&mode=gun&host=vpn.example.com#grpc-cdn"* ]]
 
   unique_uuid_count=$(printf '%s\n' "$output" \
     | grep -oE '[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}' \
