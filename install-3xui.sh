@@ -448,15 +448,21 @@ configure_xray_config() {
   # via POST /panel/api/xray/update with the xraySetting form field.
   echo "Configuring xray outbounds and routing (WARP + blocking rules)..." >&2
 
-  # Step 1: Check if WARP is already registered; only register if not.
+  # Step 1: Get the current xray config template (needed later anyway)
+  local current_xray
+  current_xray="$(api_curl -X POST "${BASE_URL}/panel/api/xray/")"
+
+  # Step 2: Check if WARP is already available — either in the panel's warp
+  # store OR as an existing wireguard outbound in the xray config (registered
+  # outside of the panel, e.g. manually or via warp-cli).
   local warp_data_resp
   warp_data_resp="$(api_curl -X POST "${BASE_URL}/panel/api/xray/warp/data")"
 
-  local warp_exists
-  warp_exists="$(python3 -c "
-import json,sys
+  local warp_source  # "panel", "config", or "none"
+  warp_source="$(WARP_DATA="$warp_data_resp" CURRENT_XRAY="$current_xray" python3 -c "
+import json,os,sys
 try:
-    d = json.loads(sys.argv[1])
+    d = json.loads(os.environ['WARP_DATA'])
     obj = d.get('obj','')
     if isinstance(obj, str) and obj:
         data = json.loads(obj)
@@ -464,32 +470,52 @@ try:
         data = obj
     else:
         data = None
-    # If there's a 'key' field, WARP is already registered
-    print('yes' if data and data.get('key') else 'no')
+    if data and data.get('key'):
+        print('panel')
+        sys.exit(0)
 except:
-    print('no')
-" "$warp_data_resp")"
+    pass
 
-  if [[ "$warp_exists" == "yes" ]]; then
-    echo "WARP already registered, reusing existing credentials." >&2
-  else
-    register_warp
-    # Give Cloudflare a moment to activate the new endpoint
-    sleep 3
-  fi
+# Check xray config for existing wireguard outbound
+try:
+    xray_resp = json.loads(os.environ['CURRENT_XRAY'])
+    obj = xray_resp.get('obj', {})
+    if isinstance(obj, str):
+        obj = json.loads(obj)
+    xray_raw = obj.get('xraySetting', '{}') if isinstance(obj, dict) else '{}'
+    xray_cfg = json.loads(xray_raw) if isinstance(xray_raw, str) else xray_raw
+    for ob in xray_cfg.get('outbounds', []):
+        if ob.get('protocol') == 'wireguard':
+            print('config')
+            sys.exit(0)
+except:
+    pass
 
-  # Step 2: Fetch the WARP wireguard outbound config the panel built
+print('none')
+")"
+
   local warp_config_resp
-  warp_config_resp="$(api_curl -X POST "${BASE_URL}/panel/api/xray/warp/config")"
-
-  # Step 3: Get the current xray config template
-  local current_xray
-  current_xray="$(api_curl -X POST "${BASE_URL}/panel/api/xray/")"
+  case "$warp_source" in
+    panel)
+      echo "WARP already registered in panel, reusing existing credentials." >&2
+      warp_config_resp="$(api_curl -X POST "${BASE_URL}/panel/api/xray/warp/config")"
+      ;;
+    config)
+      echo "Existing wireguard outbound found in xray config, reusing it." >&2
+      # We'll extract it from the current config in the python step below
+      warp_config_resp=""
+      ;;
+    *)
+      register_warp
+      sleep 3
+      warp_config_resp="$(api_curl -X POST "${BASE_URL}/panel/api/xray/warp/config")"
+      ;;
+  esac
 
   # Step 4: Patch in WARP outbound + routing rules
   local updated_xray
-  updated_xray="$(CURRENT_XRAY="$current_xray" WARP_CONFIG="$warp_config_resp" python3 << 'PYEOF'
-import json,os,sys
+  updated_xray="$(CURRENT_XRAY="$current_xray" WARP_CONFIG="${warp_config_resp}" WARP_SOURCE="${warp_source}" python3 << 'PYEOF'
+import json,os,sys,base64
 
 resp = json.loads(os.environ['CURRENT_XRAY'])
 if not resp.get('success'):
@@ -508,45 +534,59 @@ elif isinstance(xray_setting_raw, str) and xray_setting_raw:
 else:
     xray_config = {}
 
-# Parse the WARP config and build the wireguard outbound
-warp_resp = json.loads(os.environ['WARP_CONFIG'])
-warp_raw = warp_resp.get('obj', '')
-if isinstance(warp_raw, str) and warp_raw:
-    warp_data = json.loads(warp_raw)
-elif isinstance(warp_raw, dict):
-    warp_data = warp_raw
-else:
-    print('ERROR: WARP config endpoint returned empty/null.', file=sys.stderr)
+warp_source = os.environ.get('WARP_SOURCE', 'none')
+warp_outbound = None
+
+if warp_source == 'config':
+    # Reuse the existing wireguard outbound from the current xray config
+    for ob in xray_config.get('outbounds', []):
+        if ob.get('protocol') == 'wireguard':
+            warp_outbound = ob
+            break
+elif os.environ.get('WARP_CONFIG'):
+    # Build from panel's WARP registration data
+    warp_resp = json.loads(os.environ['WARP_CONFIG'])
+    warp_raw = warp_resp.get('obj', '')
+    if isinstance(warp_raw, str) and warp_raw:
+        warp_data = json.loads(warp_raw)
+    elif isinstance(warp_raw, dict):
+        warp_data = warp_raw
+    else:
+        warp_data = None
+
+    if warp_data and warp_data.get('key'):
+        private_key = warp_data['key']
+        peer_pub = warp_data['config']['peers'][0]['public_key']
+        endpoint = warp_data['config']['peers'][0]['endpoint']['host']
+        addr_v4 = warp_data['config']['interface']['addresses']['v4']
+        addr_v6 = warp_data['config']['interface']['addresses']['v6']
+        client_id = warp_data['config'].get('client_id', '')
+        reserved = list(base64.b64decode(client_id + '==')[:3]) if client_id else [0, 0, 0]
+
+        warp_outbound = {
+            'tag': 'warp',
+            'protocol': 'wireguard',
+            'settings': {
+                'mtu': 1420,
+                'secretKey': private_key,
+                'address': [addr_v4 + '/32', addr_v6 + '/128'],
+                'reserved': reserved,
+                'domainStrategy': 'ForceIPv4v6',
+                'peers': [{
+                    'publicKey': peer_pub,
+                    'endpoint': endpoint,
+                }],
+                'noKernelTun': True,
+            },
+        }
+
+if not warp_outbound:
+    print('ERROR: No WARP/wireguard outbound available.', file=sys.stderr)
     sys.exit(1)
 
-import base64
-
-private_key = warp_data['key']
-peer_pub = warp_data['config']['peers'][0]['public_key']
-endpoint = warp_data['config']['peers'][0]['endpoint']['host']
-addr_v4 = warp_data['config']['interface']['addresses']['v4']
-addr_v6 = warp_data['config']['interface']['addresses']['v6']
-client_id = warp_data['config'].get('client_id', '')
-
-# Decode client_id (base64) to reserved bytes
-reserved = list(base64.b64decode(client_id + '==')[:3]) if client_id else [0, 0, 0]
-
-warp_outbound = {
-    'tag': 'warp',
-    'protocol': 'wireguard',
-    'settings': {
-        'mtu': 1420,
-        'secretKey': private_key,
-        'address': [addr_v4 + '/32', addr_v6 + '/128'],
-        'reserved': reserved,
-        'domainStrategy': 'ForceIPv4v6',
-        'peers': [{
-            'publicKey': peer_pub,
-            'endpoint': endpoint,
-        }],
-        'noKernelTun': True,
-    },
-}
+# Ensure tag is set
+if 'tag' not in warp_outbound:
+    warp_outbound['tag'] = 'warp'
 
 xray_config['outbounds'] = [
     {
