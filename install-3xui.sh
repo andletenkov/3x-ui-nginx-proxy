@@ -409,6 +409,165 @@ except Exception as e:
   echo "WARNING: Subscription service did not start listening on port ${SUB_PORT} within 30s." >&2
 }
 
+register_warp() {
+  # Registers a new device with Cloudflare WARP and outputs the WireGuard
+  # credentials as JSON. Requires wireguard-tools for key generation.
+  echo "Registering with Cloudflare WARP..." >&2
+
+  if ! command -v wg >/dev/null 2>&1; then
+    apt-get install -y wireguard-tools >&2 || die "Failed to install wireguard-tools (needed for wg genkey)."
+  fi
+
+  local private_key public_key
+  private_key="$(wg genkey)"
+  public_key="$(printf '%s' "$private_key" | wg pubkey)"
+
+  local reg_resp
+  reg_resp="$(curl -fsSL -X POST 'https://api.cloudflareclient.com/v0a2158/reg' \
+    -H 'Content-Type: application/json' \
+    -H 'CF-Client-Version: a-7.21-0721' \
+    -d "{\"key\":\"${public_key}\",\"tos\":\"$(date -u +%Y-%m-%dT%H:%M:%S.000Z)\"}")" ||
+    die "WARP registration failed."
+
+  python3 -c "
+import json,sys,base64
+
+reg = json.loads(sys.argv[1])
+private_key = sys.argv[2]
+
+peer_pub = reg['config']['peers'][0]['public_key']
+endpoint = reg['config']['peers'][0]['endpoint']['host']
+addresses = reg['config']['interface']['addresses']
+client_id = reg.get('config',{}).get('client_id','')
+
+reserved = list(base64.b64decode(client_id + '==')[:3]) if client_id else [0,0,0]
+
+result = {
+    'private_key': private_key,
+    'peer_public_key': peer_pub,
+    'endpoint': endpoint,
+    'addresses': [addresses.get('v4','172.16.0.2') + '/32', addresses.get('v6','::1') + '/128'],
+    'reserved': reserved,
+}
+print(json.dumps(result))
+" "$reg_resp" "$private_key"
+}
+
+configure_xray_config() {
+  # Configures xray outbounds (direct, warp, blocked) and routing rules
+  # via the panel settings API (xrayTemplateConfig field).
+  echo "Configuring xray outbounds and routing (WARP + blocking rules)..." >&2
+
+  local warp_creds
+  warp_creds="$(register_warp)" || die "Failed to register WARP."
+
+  echo "WARP registration successful." >&2
+
+  local current_settings
+  current_settings="$(api_curl -X POST "${BASE_URL}/panel/api/setting/all")"
+
+  local updated_settings
+  updated_settings="$(CURRENT_SETTINGS="$current_settings" WARP_CREDS="$warp_creds" python3 << 'PYEOF'
+import json,os
+
+resp = json.loads(os.environ['CURRENT_SETTINGS'])
+if not resp.get('success'):
+    raise SystemExit('Failed to fetch settings: ' + resp.get('msg',''))
+
+settings = resp.get('obj') or {}
+warp = json.loads(os.environ['WARP_CREDS'])
+
+xray_config = json.loads(settings.get('xrayTemplateConfig', '{}')) if settings.get('xrayTemplateConfig') else {}
+
+xray_config['outbounds'] = [
+    {
+        'tag': 'direct',
+        'protocol': 'freedom',
+        'settings': {
+            'domainStrategy': 'AsIs',
+            'finalRules': [{'action': 'allow'}],
+        },
+    },
+    {
+        'tag': 'warp',
+        'protocol': 'wireguard',
+        'settings': {
+            'mtu': 1420,
+            'secretKey': warp['private_key'],
+            'address': warp['addresses'],
+            'reserved': warp['reserved'],
+            'domainStrategy': 'ForceIPv4v6',
+            'peers': [{
+                'publicKey': warp['peer_public_key'],
+                'endpoint': warp['endpoint'],
+            }],
+            'noKernelTun': True,
+        },
+    },
+    {
+        'tag': 'blocked',
+        'protocol': 'blackhole',
+        'settings': {},
+    },
+]
+
+xray_config.setdefault('routing', {})['rules'] = [
+    {
+        'type': 'field',
+        'inboundTag': ['api'],
+        'outboundTag': 'api',
+    },
+    {
+        'type': 'field',
+        'ip': ['geoip:ru'],
+        'outboundTag': 'warp',
+    },
+    {
+        'type': 'field',
+        'domain': [
+            'geosite:category-ru',
+            'regexp:.*\\.ru$',
+            'geosite:openai',
+        ],
+        'outboundTag': 'warp',
+    },
+    {
+        'type': 'field',
+        'ip': ['geoip:private'],
+        'outboundTag': 'blocked',
+    },
+    {
+        'type': 'field',
+        'protocol': ['bittorrent'],
+        'outboundTag': 'blocked',
+    },
+]
+
+settings['xrayTemplateConfig'] = json.dumps(xray_config)
+print(json.dumps(settings))
+PYEOF
+  )" || die "Failed to prepare xray config."
+
+  local resp
+  resp="$(api_curl -X POST "${BASE_URL}/panel/api/setting/update" \
+    -H 'Content-Type: application/json' \
+    -d "$updated_settings")"
+
+  python3 -c "
+import json,sys
+try:
+    data = json.loads(sys.argv[1])
+    if not data.get('success'):
+        print('API error:', data.get('msg','unknown'), file=sys.stderr)
+        sys.exit(1)
+except Exception as e:
+    print('Failed to parse response:', e, file=sys.stderr)
+    sys.exit(1)
+" "$resp" || die "Failed to update xray config via API."
+
+  echo "Xray outbounds and routing configured." >&2
+}
+
 main() {
   if xui_is_installed; then
     echo "3x-ui is already installed, skipping installer (reusing its existing credentials/port/path)." >&2
@@ -423,6 +582,7 @@ main() {
   ensure_ws_inbound
   ensure_grpc_inbound
   configure_subscription
+  configure_xray_config
 
   echo "Inbounds ready." >&2
 
