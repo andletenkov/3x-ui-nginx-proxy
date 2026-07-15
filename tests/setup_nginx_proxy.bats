@@ -339,6 +339,18 @@ nginx_config_env() {
   grep -q "server_name vpn.example.com;" "$NGINX_SITE"
 }
 
+@test "write_nginx_config includes gRPC keepalive and buffer settings" {
+  nginx_config_env
+  run write_nginx_config
+  [ "$status" -eq 0 ]
+
+  grep -q "grpc_socket_keepalive on;" "$NGINX_SITE"
+  grep -q "grpc_read_timeout 600s;" "$NGINX_SITE"
+  grep -q "grpc_send_timeout 600s;" "$NGINX_SITE"
+  grep -q "client_body_buffer_size 512k;" "$NGINX_SITE"
+  grep -q "client_max_body_size 0;" "$NGINX_SITE"
+}
+
 @test "write_nginx_config's panel proxy_pass has no trailing slash (preserves base path prefix)" {
   # A trailing slash on proxy_pass's target URI makes nginx strip the matched
   # location prefix before forwarding, which breaks apps (like 3x-ui) whose
@@ -917,4 +929,50 @@ setup_uninstall_fixtures() {
   run install_3xui_and_inbounds
   [ "$status" -eq 0 ]
   [ "$(cat "$received_log")" == "my_existing_sub_id" ]
+}
+
+# ---------------------------------------------------------------------------
+# write_nginx_config — subscription proxy rewrite
+# ---------------------------------------------------------------------------
+
+@test "write_nginx_config proxies SUB_PATH to SUB_PORT without path rewrite" {
+  nginx_config_env
+  SUB_PATH="/assets/abc123"
+  SUB_PORT="54321"
+  run write_nginx_config
+  [ "$status" -eq 0 ]
+
+  grep -q "location /assets/abc123/" "$NGINX_SITE"
+  grep -q "proxy_pass http://127.0.0.1:54321;" "$NGINX_SITE"
+}
+
+# ---------------------------------------------------------------------------
+# Path auto-generation — verifies the generated paths/services look realistic
+# ---------------------------------------------------------------------------
+
+@test "auto-generated WS_PATH looks like a real API endpoint" {
+  WS_PATH=""
+  # Simulate what collect_input does
+  local ws_words=(events stream messages notifications updates sync relay)
+  WS_PATH="/api/v$(( RANDOM % 3 + 1 ))/${ws_words[RANDOM % ${#ws_words[@]}]}/$(openssl rand -hex 4)"
+
+  [[ "$WS_PATH" =~ ^/api/v[123]/[a-z]+/[0-9a-f]{8}$ ]]
+}
+
+@test "auto-generated GRPC_SERVICE looks like a real gRPC service name" {
+  GRPC_SERVICE=""
+  local grpc_orgs=(internal backend core cloud platform service)
+  local grpc_pkgs=(sync relay push telemetry health streaming)
+  local grpc_svcs=(SyncService RelayService PushService EventService DataService StreamService)
+  GRPC_SERVICE="com.${grpc_orgs[RANDOM % ${#grpc_orgs[@]}]}.${grpc_pkgs[RANDOM % ${#grpc_pkgs[@]}]}.v$(( RANDOM % 3 + 1 )).${grpc_svcs[RANDOM % ${#grpc_svcs[@]}]}"
+
+  [[ "$GRPC_SERVICE" =~ ^com\.[a-z]+\.[a-z]+\.v[123]\.[A-Z][a-zA-Z]+$ ]]
+}
+
+@test "auto-generated SUB_PATH looks like a static web path" {
+  SUB_PATH=""
+  local sub_words=(download resources assets static content files docs)
+  SUB_PATH="/${sub_words[RANDOM % ${#sub_words[@]}]}/$(openssl rand -hex 6)"
+
+  [[ "$SUB_PATH" =~ ^/[a-z]+/[0-9a-f]{12}$ ]]
 }

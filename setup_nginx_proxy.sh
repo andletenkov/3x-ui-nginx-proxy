@@ -682,8 +682,12 @@ server {
         grpc_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
         grpc_set_header X-Forwarded-Proto https;
 
-        grpc_read_timeout 300s;
-        grpc_send_timeout 300s;
+        grpc_read_timeout 600s;
+        grpc_send_timeout 600s;
+        grpc_socket_keepalive on;
+
+        client_body_buffer_size 512k;
+        client_max_body_size 0;
     }
 
     location / {
