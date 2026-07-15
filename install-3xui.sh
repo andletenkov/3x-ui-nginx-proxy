@@ -153,26 +153,28 @@ read_install_result() {
 }
 
 BASE_URL=""
-AUTH_HEADER=""
 COOKIE_JAR=""
 
 setup_api_auth() {
   BASE_URL="http://127.0.0.1:${XUI_PANEL_PORT}/${XUI_WEB_BASE_PATH#/}"
 
-  if [[ -n "${XUI_API_TOKEN:-}" ]]; then
-    AUTH_HEADER="Authorization: Bearer ${XUI_API_TOKEN}"
-    return
-  fi
-
-  # Fall back to cookie-session login if no API token was generated.
+  # Always use cookie-session login. The XUI_API_TOKEN (if present) only
+  # works for /api/* routes, but inbound management lives under /panel/*
+  # which requires a session cookie.
   COOKIE_JAR="$(mktemp)"
   trap 'rm -f "$COOKIE_JAR"' EXIT
 
-  local resp
-  resp="$(curl -s -c "$COOKIE_JAR" \
+  local resp http_code
+  resp="$(curl -s -c "$COOKIE_JAR" -w '\n%{http_code}' \
+    -H 'Content-Type: application/x-www-form-urlencoded' \
     --data-urlencode "username=${XUI_USERNAME}" \
     --data-urlencode "password=${XUI_PASSWORD}" \
     "${BASE_URL}/login")"
+
+  http_code="$(printf '%s' "$resp" | tail -n1)"
+  resp="$(printf '%s' "$resp" | sed '$ d')"
+
+  echo "Login response (HTTP ${http_code}): ${resp}" >&2
 
   python3 -c "
 import json,sys
@@ -181,15 +183,11 @@ try:
 except Exception:
     ok = False
 sys.exit(0 if ok else 1)
-" "$resp" || die "3x-ui panel login failed. Response: ${resp}"
+" "$resp" || die "3x-ui panel login failed (HTTP ${http_code}). URL: ${BASE_URL}/login"
 }
 
 api_curl() {
-  if [[ -n "$AUTH_HEADER" ]]; then
-    curl -s -H "$AUTH_HEADER" "$@"
-  else
-    curl -s -b "$COOKIE_JAR" "$@"
-  fi
+  curl -s -b "$COOKIE_JAR" "$@"
 }
 
 wait_for_panel() {
