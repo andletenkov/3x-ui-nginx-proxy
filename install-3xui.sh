@@ -418,29 +418,88 @@ except Exception as e:
 }
 
 configure_xray_config() {
-  # Configures xray routing rules (ru → warp, private → blocked, bittorrent → blocked)
-  # and ensures the direct/blocked outbounds exist. If a wireguard (WARP) outbound
-  # already exists in the current xray config, it's preserved. If not, routing rules
-  # referencing 'warp' are still added (they'll activate once WARP is configured
-  # manually via the panel).
+  # Configures xray outbounds (direct, warp, blocked) and routing rules.
+  # Registers a fresh WARP account (purging any existing one first), builds
+  # the wireguard outbound from the registration response, and saves the
+  # full xray config via POST /panel/api/xray/update.
   echo "Configuring xray outbounds and routing rules..." >&2
 
-  # Get the current xray config template
+  # Step 1: Purge existing WARP data and register fresh
+  echo "Purging existing WARP data..." >&2
+  api_curl -X POST "${BASE_URL}/panel/api/xray/warp/del" >/dev/null 2>&1 || true
+
+  if ! command -v wg >/dev/null 2>&1; then
+    apt-get install -y wireguard-tools >&2 || die "Failed to install wireguard-tools."
+  fi
+
+  local private_key public_key
+  private_key="$(wg genkey)"
+  public_key="$(printf '%s' "$private_key" | wg pubkey)"
+
+  echo "Registering WARP..." >&2
+  local reg_resp
+  reg_resp="$(api_curl -X POST "${BASE_URL}/panel/api/xray/warp/reg" \
+    --data-urlencode "privateKey=${private_key}" \
+    --data-urlencode "publicKey=${public_key}")"
+
+  # Step 2: Get current xray config
   local current_xray
   current_xray="$(api_curl -X POST "${BASE_URL}/panel/api/xray/")"
 
-  # Build updated config with routing rules
-  local updated_xray
-  export CURRENT_XRAY="$current_xray"
-  updated_xray="$(python3 << 'PYEOF'
-import json,os,sys
+  # Step 3: Build the full xray config with WARP outbound + routing rules
+  local build_output
+  export REG_RESP="$reg_resp" CURRENT_XRAY="$current_xray"
+  build_output="$(python3 << 'PYEOF'
+import json,os,sys,base64
 
-resp = json.loads(os.environ['CURRENT_XRAY'])
-if not resp.get('success'):
-    print('Failed to fetch xray config:', resp.get('msg',''), file=sys.stderr)
+# Parse registration response
+reg = json.loads(os.environ['REG_RESP'])
+if not reg.get('success'):
+    print('WARP registration failed:', reg.get('msg',''), file=sys.stderr)
     sys.exit(1)
 
-obj = resp.get('obj', {})
+reg_obj = reg.get('obj', '')
+if isinstance(reg_obj, str):
+    reg_data = json.loads(reg_obj)
+else:
+    reg_data = reg_obj
+
+# Extract credentials from the registration response
+# data.private_key is the SECRET key (what we passed in)
+# config.key is the PUBLIC key (registered with Cloudflare)
+warp_private_key = reg_data['data']['private_key']
+client_id = reg_data['data'].get('client_id', '')
+peer_pub = reg_data['config']['peers'][0]['public_key']
+endpoint = reg_data['config']['peers'][0]['endpoint']['host']
+addr_v4 = reg_data['config']['interface']['addresses']['v4']
+addr_v6 = reg_data['config']['interface']['addresses']['v6']
+
+reserved = list(base64.b64decode(client_id + '==')[:3]) if client_id else [0, 0, 0]
+
+warp_outbound = {
+    'tag': 'warp',
+    'protocol': 'wireguard',
+    'settings': {
+        'mtu': 1420,
+        'secretKey': warp_private_key,
+        'address': [addr_v4 + '/32', addr_v6 + '/128'],
+        'reserved': reserved,
+        'domainStrategy': 'ForceIPv4v6',
+        'peers': [{
+            'publicKey': peer_pub,
+            'endpoint': endpoint,
+        }],
+        'noKernelTun': True,
+    },
+}
+
+# Parse current xray config
+xray_resp = json.loads(os.environ['CURRENT_XRAY'])
+if not xray_resp.get('success'):
+    print('Failed to fetch xray config:', xray_resp.get('msg',''), file=sys.stderr)
+    sys.exit(1)
+
+obj = xray_resp.get('obj', {})
 if isinstance(obj, str):
     obj = json.loads(obj)
 
@@ -452,18 +511,8 @@ elif isinstance(xray_setting_raw, str) and xray_setting_raw:
 else:
     xray_config = {}
 
-# Find existing wireguard outbound (WARP) if any
-existing_outbounds = xray_config.get('outbounds', [])
-warp_outbound = None
-for ob in existing_outbounds:
-    if ob.get('protocol') == 'wireguard':
-        warp_outbound = ob
-        if 'tag' not in ob or not ob['tag']:
-            ob['tag'] = 'warp'
-        break
-
-# Build outbounds list
-outbounds = [
+# Set outbounds (replacing any existing wireguard outbound with fresh one)
+xray_config['outbounds'] = [
     {
         'tag': 'direct',
         'protocol': 'freedom',
@@ -472,21 +521,13 @@ outbounds = [
             'finalRules': [{'action': 'allow'}],
         },
     },
+    warp_outbound,
+    {
+        'tag': 'blocked',
+        'protocol': 'blackhole',
+        'settings': {},
+    },
 ]
-
-if warp_outbound:
-    outbounds.append(warp_outbound)
-    print('Existing WARP outbound preserved.', file=sys.stderr)
-else:
-    print('WARNING: No wireguard/WARP outbound found. Routing rules for warp will be inactive until WARP is configured manually in the panel.', file=sys.stderr)
-
-outbounds.append({
-    'tag': 'blocked',
-    'protocol': 'blackhole',
-    'settings': {},
-})
-
-xray_config['outbounds'] = outbounds
 
 # Set routing rules
 xray_config.setdefault('routing', {})['rules'] = [
@@ -521,11 +562,17 @@ xray_config.setdefault('routing', {})['rules'] = [
     },
 ]
 
-print(json.dumps(xray_config))
+output = {'xray_config': xray_config, 'warp_outbound': warp_outbound}
+print(json.dumps(output))
 PYEOF
-  )" || die "Failed to prepare xray config."
+  )" || die "Failed to build xray config."
 
-  # Save via the correct endpoint
+  local updated_xray warp_outbound_json
+  export BUILD_OUTPUT="$build_output"
+  updated_xray="$(python3 -c 'import json,os; print(json.dumps(json.loads(os.environ["BUILD_OUTPUT"])["xray_config"]))')"
+  warp_outbound_json="$(python3 -c 'import json,os; print(json.dumps(json.loads(os.environ["BUILD_OUTPUT"])["warp_outbound"]))')"
+
+  # Step 4: Save xray config
   local resp
   resp="$(api_curl -X POST "${BASE_URL}/panel/api/xray/update" \
     --data-urlencode "xraySetting=${updated_xray}")"
@@ -540,9 +587,36 @@ try:
 except Exception as e:
     print('Failed to parse response:', e, file=sys.stderr)
     sys.exit(1)
-" "$resp" || die "Failed to save xray config via /panel/api/xray/update."
+" "$resp" || die "Failed to save xray config."
 
-  echo "Xray routing rules configured." >&2
+  echo "Xray config saved. Testing WARP outbound..." >&2
+
+  # Step 5: Test the WARP outbound
+  sleep 2
+  local test_resp
+  test_resp="$(api_curl -X POST "${BASE_URL}/panel/api/xray/testOutbound" \
+    --data-urlencode "outbound=${warp_outbound_json}" \
+    --data-urlencode "mode=real")"
+
+  python3 -c "
+import json,sys
+try:
+    data = json.loads(sys.argv[1])
+    if data.get('success'):
+        obj = data.get('obj', {})
+        if isinstance(obj, list):
+            obj = obj[0] if obj else {}
+        if obj.get('success'):
+            print(f\"WARP test passed: {obj.get('delay',0)}ms, egress={obj.get('egress',{}).get('country','?')}\", file=sys.stderr)
+        else:
+            print(f\"WARNING: WARP test failed: {obj.get('error','unknown')}\", file=sys.stderr)
+    else:
+        print(f\"WARNING: WARP test request failed: {data.get('msg','unknown')}\", file=sys.stderr)
+except Exception as e:
+    print(f'WARNING: Could not parse test response: {e}', file=sys.stderr)
+" "$test_resp"
+
+  echo "Xray outbounds and routing configured." >&2
 }
 
 main() {
