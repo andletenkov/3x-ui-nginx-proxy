@@ -891,7 +891,7 @@ generate_uuid() {
 }
 
 install_3xui_and_inbounds() {
-  local script_dir installer_out line key value installer_script
+  local script_dir installer_out key value installer_script
   script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
 
   # INSTALL_3XUI_SCRIPT allows tests to stub the installer without touching
