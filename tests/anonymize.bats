@@ -74,13 +74,26 @@ EOF
   [ ! -f "$RESOLVED_CONF" ]
 }
 
-@test "harden_dns writes DoT config when systemd-resolved is present" {
+@test "harden_dns writes default resolver config when systemd-resolved is present" {
   systemctl() { return 0; }
   run harden_dns
   [ "$status" -eq 0 ]
   [ -f "$RESOLVED_CONF" ]
   grep -q "DNSOverTLS=yes" "$RESOLVED_CONF"
+  grep -q "DNSSEC=yes" "$RESOLVED_CONF"
   grep -q "1.1.1.1#cloudflare-dns.com" "$RESOLVED_CONF"
+}
+
+@test "harden_dns honors DNS_* env overrides" {
+  systemctl() { return 0; }
+  DNS_RESOLVERS='9.9.9.9#dns.quad9.net 149.112.112.112#dns.quad9.net' \
+  DNS_OVER_TLS_MODE='opportunistic' \
+  DNSSEC_MODE='allow-downgrade' \
+  run harden_dns
+  [ "$status" -eq 0 ]
+  grep -q "DNS=9.9.9.9#dns.quad9.net 149.112.112.112#dns.quad9.net" "$RESOLVED_CONF"
+  grep -q "DNSOverTLS=opportunistic" "$RESOLVED_CONF"
+  grep -q "DNSSEC=allow-downgrade" "$RESOLVED_CONF"
 }
 
 @test "unharden_dns removes the resolved config if present" {

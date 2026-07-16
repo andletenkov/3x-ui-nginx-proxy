@@ -112,7 +112,7 @@ Nginx/UFW/certs.
 
 `anonymize.sh --uninstall` can also be run directly to revert just the
 anonymization changes (sysctl, DNS resolver, ICMP/TTL iptables rules, SSH
-banner) without touching Nginx/3x-ui/UFW.
+banner, BBR) without touching Nginx/3x-ui/UFW.
 
 ### Anonymizing the VPS
 
@@ -128,7 +128,7 @@ checks (e.g. 2ip.io's "privacy bar") key off of:
 | Signal | What's done |
 |---|---|
 | Clock skew | Enables NTP time sync (chrony, or `timedatectl set-ntp`) |
-| DNS resolver fingerprint/leak | Points the system resolver at Cloudflare (1.1.1.1/1.0.0.1) over DNS-over-TLS via `systemd-resolved`, instead of the datacenter's default resolver |
+| DNS resolver fingerprint/leak | Points the system resolver at a configurable public resolver set over DNS-over-TLS via `systemd-resolved`, instead of the datacenter's default resolver |
 | ICMP/network-stack fingerprinting | sysctl hardening: ICMP redirects off, source routing off, `rp_filter` on, SYN cookies on |
 | Ping-based liveness/hop probing | **Two-way ICMP echo block** — the box neither answers pings (`INPUT`) nor can originate one (`OUTPUT`), via both `iptables` and `sysctl net.ipv4.icmp_echo_ignore_all` |
 | Hop-count/TTL inconsistency | Normalizes outbound TTL to `64` via an `iptables` mangle rule, so WARP-routed vs direct-routed traffic doesn't show a different hop count |
@@ -138,6 +138,20 @@ Also enables **BBR congestion control** (`net.ipv4.tcp_congestion_control=bbr`
 + `net.core.default_qdisc=fq`) for better throughput on loss/high-latency
 routes. Skipped gracefully if the kernel doesn't support the `tcp_bbr`
 module.
+
+Resolver defaults:
+- `DNS_RESOLVERS='1.1.1.1#cloudflare-dns.com 1.0.0.1#cloudflare-dns.com'`
+- `DNS_OVER_TLS_MODE='yes'`
+- `DNSSEC_MODE='yes'`
+
+Example override:
+
+```bash
+sudo DNS_RESOLVERS='9.9.9.9#dns.quad9.net 149.112.112.112#dns.quad9.net' \
+     DNS_OVER_TLS_MODE=yes \
+     DNSSEC_MODE=yes \
+     ./anonymize.sh
+```
 
 **Not fixable from inside the VPS:** IP/ASN reputation (hosting-provider IP
 ranges are flagged by IP-intelligence databases regardless of in-VM config),

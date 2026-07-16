@@ -57,8 +57,9 @@ against stubbed `sysctl`/`iptables`/`systemctl`/`timedatectl`/`apt-get`:
 
 - `harden_ntp` / `unharden_ntp` — chrony-preferred-over-timedatectl branch
   selection
-- `harden_dns` / `unharden_dns` — DoT config written only when
-  `systemd-resolved` is present; clean skip otherwise
+- `harden_dns` / `unharden_dns` — resolver config written only when
+  `systemd-resolved` is present; covers both defaults and `DNS_RESOLVERS` /
+  `DNS_OVER_TLS_MODE` / `DNSSEC_MODE` overrides; clean skip otherwise
 - `harden_sysctl` / `unharden_sysctl` — all expected directives present,
   including `icmp_echo_ignore_all` and the normalized default TTL
 - `harden_ping_block` / `unharden_ping_block` — two-way ICMP echo-request
