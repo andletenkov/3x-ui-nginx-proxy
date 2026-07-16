@@ -1002,8 +1002,8 @@ print_client_links() {
   echo "  URL:      https://${PANEL_SUBDOMAIN}.${BASE_DOMAIN}${PANEL_PATH}/"
   echo
   echo "=== Client VLESS URIs (ready to import into your client app) ==="
-  echo "vless://${CLIENT_UUID}@${VLESS_SUBDOMAIN}.${BASE_DOMAIN}:443?type=ws&security=tls&path=$(printf '%s' "$WS_PATH" | sed 's#/#%2F#g')&host=${VLESS_SUBDOMAIN}.${BASE_DOMAIN}#${VPS_FLAG} WebSocket CDN"
-  echo "vless://${CLIENT_UUID}@${VLESS_SUBDOMAIN}.${BASE_DOMAIN}:443?type=grpc&security=tls&serviceName=${GRPC_SERVICE}&mode=gun&host=${VLESS_SUBDOMAIN}.${BASE_DOMAIN}#${VPS_FLAG} gRPC CDN"
+  echo "vless://${CLIENT_UUID}@${VLESS_SUBDOMAIN}.${BASE_DOMAIN}:443?type=ws&security=tls&path=$(printf '%s' "$WS_PATH" | sed 's#/#%2F#g')&host=${VLESS_SUBDOMAIN}.${BASE_DOMAIN}#${INBOUND_REMARK_WS}"
+  echo "vless://${CLIENT_UUID}@${VLESS_SUBDOMAIN}.${BASE_DOMAIN}:443?type=grpc&security=tls&serviceName=${GRPC_SERVICE}&mode=gun&host=${VLESS_SUBDOMAIN}.${BASE_DOMAIN}#${INBOUND_REMARK_GRPC}"
 }
 
 verify_deployment() {
