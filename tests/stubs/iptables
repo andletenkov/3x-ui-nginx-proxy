@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+# Stub for `iptables`. Stateful: tracks "added" rules in a plain-text file
+# (one normalized rule per line) so -C/-A/-D behave consistently and tests
+# can assert on what would have been persisted. Controlled via
+# IPTABLES_STATE_FILE (defaults to a fixed path under TMPDIR so unset tests
+# still work, but real isolation should always set it per-test).
+set -eu
+
+STATE_FILE="${IPTABLES_STATE_FILE:-${TMPDIR:-/tmp}/iptables-stub-state}"
+touch "$STATE_FILE" 2>/dev/null || true
+
+# Normalize the rule signature: everything after the table/chain flag,
+# excluding the -C/-A/-D/-I action flag itself, so -C/-A/-D of "the same"
+# rule compare equal regardless of which action flag was used.
+normalize() {
+  local out=() skip_next=false arg
+  for arg in "$@"; do
+    if $skip_next; then
+      skip_next=false
+      continue
+    fi
+    case "$arg" in
+      -C|-A|-D|-I) continue ;;
+      *) out+=("$arg") ;;
+    esac
+  done
+  printf '%s\n' "${out[*]}"
+}
+
+action=""
+for arg in "$@"; do
+  case "$arg" in
+    -C) action="check"; break ;;
+    -A) action="append"; break ;;
+    -D) action="delete"; break ;;
+    -I) action="insert"; break ;;
+  esac
+done
+
+sig="$(normalize "$@")"
+
+case "$action" in
+  check)
+    grep -qxF -- "$sig" "$STATE_FILE"
+    exit $?
+    ;;
+  append|insert)
+    if ! grep -qxF -- "$sig" "$STATE_FILE"; then
+      echo "$sig" >> "$STATE_FILE"
+    fi
+    exit 0
+    ;;
+  delete)
+    if grep -qxF -- "$sig" "$STATE_FILE"; then
+      grep -vxF -- "$sig" "$STATE_FILE" > "${STATE_FILE}.tmp" || true
+      mv "${STATE_FILE}.tmp" "$STATE_FILE"
+      exit 0
+    else
+      exit 1
+    fi
+    ;;
+  *)
+    exit 0
+    ;;
+esac

@@ -1,25 +1,29 @@
-# Tests for setup_nginx_proxy.sh
+# Tests for install.sh, install-3xui.sh and anonymize.sh
 
 Unit tests using [bats-core](https://github.com/bats-core/bats-core). No root
 privileges or real system changes required — every system-mutating command
-(`nginx`, `curl`, `ss`, `ufw`, `certbot`, `systemctl`, `apt`) is stubbed out
-via `tests/stubs/`, which is prepended to `PATH` before `setup_nginx_proxy.sh` is sourced.
+(`nginx`, `curl`, `ss`, `ufw`, `certbot`, `systemctl`, `apt`, `apt-get`,
+`sysctl`, `iptables`, `timedatectl`, `netfilter-persistent`) is stubbed out
+via `tests/stubs/`, which is prepended to `PATH` before the scripts are
+sourced. Two test files: `tests/install.bats` (covers `install.sh`, and
+`install-3xui.sh` integration points via stubs) and `tests/anonymize.bats`
+(covers `anonymize.sh` directly).
 
 ## Running
 
 ```bash
 brew install bats-core   # or: apt install bats
-bats tests/setup_nginx_proxy.bats
+chmod +x tests/stubs/*
+bats tests/install.bats tests/anonymize.bats
 ```
 
-## What's covered
+## What's covered (`tests/install.bats`)
 
 - `validate_port` — numeric/range validation
 - `normalize_panel_path` / `normalize_ws_path` — slash normalization, root-path
   rejection, character whitelist (`^/[A-Za-z0-9/_-]*$`)
 - `validate_inputs` — domain/email/service-name regexes, and all the
-  port-collision rules (panel/ws/grpc mutually distinct, none equal to 443,
-  none equal to 443)
+  port-collision rules (panel/ws/grpc mutually distinct, none equal to 443)
 - `port_is_listening` / `random_free_port` — driven by the `ss` stub via the
   `SS_LISTENING_PORTS` env var
 - `write_nginx_config` — correct interpolation of ports/paths/domains, the
@@ -39,8 +43,35 @@ bats tests/setup_nginx_proxy.bats
   `XUI_VERSION` is forwarded, and failure/collision paths `die` cleanly
 - `uninstall_all` (`--uninstall`) — removes the Nginx site, Cloudflare
   real-IP config, Certbot hook/cert, Cloudflare credentials, this script's
-  UFW rules, and delegates to `install-3xui.sh --uninstall`; cancels cleanly
-  without touching anything if not confirmed
+  UFW rules, and delegates to `install-3xui.sh --uninstall` AND
+  `anonymize.sh --uninstall`; cancels cleanly without touching anything if
+  not confirmed
+- `anonymize_vps` — stubs `anonymize.sh` via `ANONYMIZE_SCRIPT` to verify
+  it's invoked, and that a failure/missing script warns without aborting
+  the install
+
+## What's covered (`tests/anonymize.bats`)
+
+Each `harden_*`/`unharden_*` function pair, applied and reverted directly
+against stubbed `sysctl`/`iptables`/`systemctl`/`timedatectl`/`apt-get`:
+
+- `harden_ntp` / `unharden_ntp` — chrony-preferred-over-timedatectl branch
+  selection
+- `harden_dns` / `unharden_dns` — DoT config written only when
+  `systemd-resolved` is present; clean skip otherwise
+- `harden_sysctl` / `unharden_sysctl` — all expected directives present,
+  including `icmp_echo_ignore_all` and the normalized default TTL
+- `harden_ping_block` / `unharden_ping_block` — two-way ICMP echo-request
+  DROP rules (`INPUT` + `OUTPUT`), idempotent re-application, graceful skip
+  when `iptables` is absent
+- `harden_ttl` / `unharden_ttl` — POSTROUTING TTL-set mangle rule,
+  idempotent re-application
+- `harden_banners` / `unharden_banners` — SSH `Banner none` config
+- `uninstall_all` — full revert of everything a complete run would have
+  applied; requires root
+- `main --uninstall` dispatch
+- `print_limitations` — documents the IP/ASN reputation, reverse-DNS and
+  WebRTC caveats
 
 ## What's intentionally NOT unit tested
 
@@ -50,7 +81,7 @@ bats tests/setup_nginx_proxy.bats
   smoke-tested manually or in a disposable VM/container against a throwaway
   Cloudflare-managed test domain, not covered by this unit suite.
 - `main()` itself — it is guarded by a `BASH_SOURCE` check so that sourcing
-  `setup_nginx_proxy.sh` for tests does not trigger a real run.
+  `install.sh` for tests does not trigger a real run.
 
 ## Stubs
 
@@ -63,4 +94,7 @@ environment variables so tests stay hermetic and fast:
 | `nginx`      | `NGINX_T_SHOULD_FAIL=1` (makes `nginx -t` fail)    |
 | `curl`       | `CURL_SHOULD_FAIL=1`, `CURL_CF_IPV4`, `CURL_CF_IPV6`, `CURL_HTTP_CODE` |
 | `ufw`        | `UFW_LOG=/path/to/file` (appends invocations)      |
-| `systemctl`, `certbot`, `apt` | always succeed, no-op            |
+| `iptables`   | `IPTABLES_STATE_FILE=/path/to/file` — stateful fake: tracks added rules so `-C`/`-A`/`-D` behave consistently across calls |
+| `sysctl`     | `-p <file>` fails if the file doesn't exist, mirroring real behavior |
+| `timedatectl`| `status` prints lines containing `sync`/`ntp` for the log-grep in `harden_ntp` |
+| `systemctl`, `certbot`, `apt`, `apt-get`, `netfilter-persistent` | always succeed, no-op |

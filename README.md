@@ -8,15 +8,16 @@ front of its panel and VLESS/WS + VLESS/gRPC **Xray** inbounds, behind
 **Cloudflare**, with a **Let's Encrypt wildcard certificate** (DNS-01) and a
 locked-down **UFW** firewall.
 
-Two scripts:
+Three scripts:
 
 | Script | Responsibility |
 |---|---|
-| `install-3xui.sh` | Installs 3x-ui unattended (or reuses an existing install), creates the WS/gRPC inbounds via the panel API. Invoked automatically by `setup_nginx_proxy.sh` — not normally run by hand. |
-| `setup_nginx_proxy.sh` | Everything else: Nginx reverse proxy, TLS, UFW, Cloudflare real-IP restoration. Calls `install-3xui.sh` as part of its flow. |
+| `install-3xui.sh` | Installs 3x-ui unattended (or reuses an existing install), creates the WS/gRPC inbounds via the panel API. Invoked automatically by `install.sh` — not normally run by hand. |
+| `anonymize.sh` | Hardens the VPS against server-side anonymity/VPN-detection signals (clock sync, DNS resolver, sysctl, two-way ICMP ping block, TTL normalization, banners). Invoked automatically by `install.sh` — can also be run standalone. |
+| `install.sh` | Everything else: Nginx reverse proxy, TLS, UFW, Cloudflare real-IP restoration. Calls `install-3xui.sh` and `anonymize.sh` as part of its flow. |
 
 3x-ui itself is the source of truth for its username/password/web-base-path
-(generated securely by its own installer); `setup_nginx_proxy.sh` only
+(generated securely by its own installer); `install.sh` only
 pre-reserves the panel **port** up front so it can't collide with the
 WS/gRPC/Subscription ports it also owns.
 
@@ -62,11 +63,11 @@ Everything else on either domain returns `404`.
 
 ```bash
 git clone https://github.com/andletenkov/3x-ui-nginx-proxy.git && cd 3x-ui-nginx-proxy
-chmod +x setup_nginx_proxy.sh install-3xui.sh
-sudo ./setup_nginx_proxy.sh
+chmod +x install.sh install-3xui.sh
+sudo ./install.sh
 ```
 
-(`install-3xui.sh` must sit next to `setup_nginx_proxy.sh` — it's invoked
+(`install-3xui.sh` must sit next to `install.sh` — it's invoked
 automatically, not downloaded separately.)
 
 You'll be prompted for the base domain, subdomains, email, internal ports
@@ -79,17 +80,18 @@ it) — that's entirely outside its scope. Make sure SSH is already reachable
 through UFW on your host (`ufw allow <ssh-port>/tcp`) before it enables UFW,
 or you may need console/provider access to fix a lockout.
 
-During the run, 3x-ui is installed unattended (or reused if already
-installed) and the WS/gRPC inbounds are created automatically via its panel
-API — no manual copy-pasting of inbound JSON. The generated panel
-username/password are printed at the end, along with ready-to-import
-`vless://` client links. The script then optionally runs a live check
-(internal ports listening + public HTTPS reachability).
+During the run, the VPS is anonymized (see [Anonymizing the VPS](#anonymizing-the-vps)
+below), 3x-ui is installed unattended (or reused if already installed), and
+the WS/gRPC inbounds are created automatically via its panel API — no
+manual copy-pasting of inbound JSON. The generated panel username/password
+are printed at the end, along with ready-to-import `vless://` client links.
+The script then optionally runs a live check (internal ports listening +
+public HTTPS reachability).
 
 ### Pinning the 3x-ui version
 
 ```bash
-sudo XUI_VERSION=v3.4.0 ./setup_nginx_proxy.sh
+sudo XUI_VERSION=v3.4.0 ./install.sh
 ```
 
 Unset (default) installs the latest stable 3x-ui release. `dev-latest` is
@@ -99,7 +101,7 @@ install — ignored if 3x-ui is already installed on the host.
 ### Uninstalling
 
 ```bash
-sudo ./setup_nginx_proxy.sh --uninstall
+sudo ./install.sh --uninstall
 ```
 
 Removes everything both scripts set up: the Nginx site and Cloudflare
@@ -112,6 +114,42 @@ pieces were never installed.
 `install-3xui.sh --uninstall` can also be run directly to remove just 3x-ui
 (service, binary, `/etc/x-ui`, `/usr/local/x-ui`) without touching
 Nginx/UFW/certs.
+
+`anonymize.sh --uninstall` can also be run directly to revert just the
+anonymization changes (sysctl, DNS resolver, ICMP/TTL iptables rules, SSH
+banner) without touching Nginx/3x-ui/UFW.
+
+### Anonymizing the VPS
+
+```bash
+sudo ./anonymize.sh              # apply
+sudo ./anonymize.sh --uninstall  # revert
+```
+
+Run automatically as part of `install.sh`, or standalone at any time.
+Hardens the VPS against server-side signals that anonymity/VPN-detection
+checks (e.g. 2ip.io's "privacy bar") key off of:
+
+| Signal | What's done |
+|---|---|
+| Clock skew | Enables NTP time sync (chrony, or `timedatectl set-ntp`) |
+| DNS resolver fingerprint/leak | Points the system resolver at Cloudflare (1.1.1.1/1.0.0.1) over DNS-over-TLS via `systemd-resolved`, instead of the datacenter's default resolver |
+| ICMP/network-stack fingerprinting | sysctl hardening: ICMP redirects off, source routing off, `rp_filter` on, SYN cookies on |
+| Ping-based liveness/hop probing | **Two-way ICMP echo block** — the box neither answers pings (`INPUT`) nor can originate one (`OUTPUT`), via both `iptables` and `sysctl net.ipv4.icmp_echo_ignore_all` |
+| Hop-count/TTL inconsistency | Normalizes outbound TTL to `64` via an `iptables` mangle rule, so WARP-routed vs direct-routed traffic doesn't show a different hop count |
+| Service-banner fingerprinting | Suppresses the SSH pre-auth banner (nginx's `server_tokens off` is already handled by `install.sh`) |
+
+**What it explicitly does NOT and cannot fix** (printed as a reminder at
+the end of every run):
+
+- **IP/ASN reputation** — your VPS provider's IP range is almost certainly
+  tagged "hosting"/"datacenter" by IP-intelligence databases (2ip, ipinfo.io,
+  MaxMind, etc.), independent of any in-VM configuration. Only a
+  residential/mobile-carrier IP avoids this, which no script can grant you
+  on a VPS.
+- **Reverse DNS (PTR record)** — set via your hosting provider's control
+  panel/API, not from inside the VM.
+- **WebRTC leaks** — entirely client-side (browser), out of server scope.
 
 ### WARP outbound and routing
 
@@ -152,13 +190,13 @@ blocking/routing categories.
 | `SUB_PATH` | `/sub` | Prompted |
 | `CLOUDFLARE_API_TOKEN` | — | Prompted (hidden) unless already exported |
 | `XUI_VERSION` | latest stable | Env var only (not prompted). 3x-ui release tag, e.g. `v3.4.0`, or `dev-latest`. Ignored if 3x-ui is already installed |
-| `PANEL_PORT` | random | **Not prompted.** Reserved by `setup_nginx_proxy.sh` itself (excluded from `443`/`SUB_PORT`/`WS_PORT`/`GRPC_PORT`) and handed to the 3x-ui installer as `XUI_PANEL_PORT` |
+| `PANEL_PORT` | random | **Not prompted.** Reserved by `install.sh` itself (excluded from `443`/`SUB_PORT`/`WS_PORT`/`GRPC_PORT`) and handed to the 3x-ui installer as `XUI_PANEL_PORT` |
 | `PANEL_PATH` | random | **Not prompted.** Generated securely by the 3x-ui installer itself (`XUI_WEB_BASE_PATH`) |
 | 3x-ui username/password | random | **Not prompted or settable here.** Generated securely by the 3x-ui installer, printed at the end of the run |
 
 `PANEL_PORT`/`SUB_PORT`/`WS_PORT`/`GRPC_PORT` must all differ from each
 other and from `443`. `PANEL_PORT` itself is only known after 3x-ui
-installs (see [Usage](#usage)) — `setup_nginx_proxy.sh` re-validates it
+installs (see [Usage](#usage)) — `install.sh` re-validates it
 doesn't collide with any of the above once reported back. SSH is entirely
 out of scope for this script (see the note in [Usage](#usage)) — no port is
 prompted for it and no UFW rule is added or removed for it.
@@ -191,7 +229,7 @@ overwritten.
 ```bash
 brew install bats-core   # or: apt install bats
 chmod +x tests/stubs/*
-bats tests/setup_nginx_proxy.bats
+bats tests/install.bats tests/anonymize.bats
 ```
 
 See [`tests/README.md`](tests/README.md) for coverage details. CI

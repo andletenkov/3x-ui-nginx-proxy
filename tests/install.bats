@@ -1,18 +1,18 @@
 #!/usr/bin/env bats
 #
-# Unit tests for setup_nginx_proxy.sh.
+# Unit tests for install.sh.
 #
 # Run with:
 #   bats tests/setup.bats
 #
 # These tests stub out all system-mutating commands (nginx, curl, ss, ufw,
-# certbot, systemctl, apt) via tests/stubs/ on PATH, and source setup_nginx_proxy.sh
+# certbot, systemctl, apt) via tests/stubs/ on PATH, and source install.sh
 # without executing main() (guarded by the BASH_SOURCE check at the bottom
 # of the script). No root privileges or real system changes are required.
 
 setup() {
   export PATH="${BATS_TEST_DIRNAME}/stubs:$PATH"
-  export SCRIPT="${BATS_TEST_DIRNAME}/../setup_nginx_proxy.sh"
+  export SCRIPT="${BATS_TEST_DIRNAME}/../install.sh"
 
   # shellcheck disable=SC1090
   source "$SCRIPT"
@@ -751,7 +751,14 @@ EOF
 setup_uninstall_fixtures() {
   # Shared fixture wiring for uninstall_all tests: overrides require_root
   # (tests don't run as root) and all path/port vars to BATS_TEST_TMPDIR.
+  # Also stubs ANONYMIZE_SCRIPT by default so uninstall_all never shells out
+  # to the real anonymize.sh (which would require root and touch real
+  # system files) unless a test explicitly wants to assert on it.
   require_root() { :; }
+
+  local default_anonymize_stub="${BATS_TEST_TMPDIR}/anonymize.sh"
+  write_uninstall_stub "$default_anonymize_stub" "${BATS_TEST_TMPDIR}/anonymize-called"
+  export ANONYMIZE_SCRIPT="$default_anonymize_stub"
 
   CONFIG_FILE="${BATS_TEST_TMPDIR}/xui-proxy.conf"
   STATE_FILE="${BATS_TEST_TMPDIR}/xui-proxy-ports.state"
@@ -975,4 +982,62 @@ setup_uninstall_fixtures() {
   SUB_PATH="/${sub_words[RANDOM % ${#sub_words[@]}]}/$(openssl rand -hex 6)"
 
   [[ "$SUB_PATH" =~ ^/[a-z]+/[0-9a-f]{12}$ ]]
+}
+
+# ---------------------------------------------------------------------------
+# anonymize_vps -- stubs the real anonymize.sh via ANONYMIZE_SCRIPT so no
+# root/network access is required.
+# ---------------------------------------------------------------------------
+
+@test "anonymize_vps invokes anonymize.sh next to install.sh" {
+  local marker="${BATS_TEST_TMPDIR}/anonymize-called"
+  local stub="${BATS_TEST_TMPDIR}/anonymize.sh"
+  write_uninstall_stub "$stub" "$marker"
+  export ANONYMIZE_SCRIPT="$stub"
+
+  run anonymize_vps
+  [ "$status" -eq 0 ]
+  [ -f "$marker" ]
+}
+
+@test "anonymize_vps does not abort the install if anonymize.sh fails" {
+  local stub="${BATS_TEST_TMPDIR}/anonymize.sh"
+  cat > "$stub" <<'EOF'
+#!/usr/bin/env bash
+echo "boom" >&2
+exit 1
+EOF
+  chmod +x "$stub"
+  export ANONYMIZE_SCRIPT="$stub"
+
+  run anonymize_vps
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"WARNING: anonymize.sh reported an error"* ]]
+}
+
+@test "anonymize_vps warns but does not fail if anonymize.sh is missing" {
+  export ANONYMIZE_SCRIPT="${BATS_TEST_TMPDIR}/does-not-exist.sh"
+
+  run anonymize_vps
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"WARNING: anonymize.sh not found"* ]]
+}
+
+@test "uninstall_all invokes anonymize.sh --uninstall" {
+  setup_uninstall_fixtures
+
+  local anonymize_marker="${BATS_TEST_TMPDIR}/anonymize-called"
+  local anonymize_stub="${BATS_TEST_TMPDIR}/anonymize.sh"
+  write_uninstall_stub "$anonymize_stub" "$anonymize_marker"
+  export ANONYMIZE_SCRIPT="$anonymize_stub"
+
+  local installer_stub="${BATS_TEST_TMPDIR}/install-3xui.sh"
+  write_uninstall_stub "$installer_stub" "${BATS_TEST_TMPDIR}/installer-called"
+  export INSTALL_3XUI_SCRIPT="$installer_stub"
+
+  run uninstall_all <<< "y"
+  [ "$status" -eq 0 ]
+
+  [ -f "$anonymize_marker" ]
+  [[ "$(cat "$anonymize_marker")" == *"--uninstall"* ]]
 }

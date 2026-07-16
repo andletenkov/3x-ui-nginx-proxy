@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# Stub for `timedatectl`. `set-ntp true` succeeds; `status` prints a line
+# containing "sync"/"ntp" so anonymize.sh's log grep has something to match.
+set -eu
+
+case "${1:-}" in
+  set-ntp)
+    exit 0
+    ;;
+  status)
+    echo "System clock synchronized: yes"
+    echo "NTP service: active"
+    exit 0
+    ;;
+  *)
+    exit 0
+    ;;
+esac

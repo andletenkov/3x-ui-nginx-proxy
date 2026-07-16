@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# Stub for `sysctl`. `-p <file>` succeeds as long as the file exists (mirrors
+# real sysctl's behavior of failing on a missing/unreadable file).
+set -eu
+
+if [[ "${1:-}" == "-p" ]]; then
+  [[ -f "${2:-}" ]] || exit 1
+  exit 0
+fi
+
+exit 0

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Installs 3x-ui unattended (if not already installed) and creates the
-# VLESS/WS + VLESS/gRPC inbounds via the 3x-ui panel API. Invoked by setup_nginx_proxy.sh.
+# VLESS/WS + VLESS/gRPC inbounds via the 3x-ui panel API. Invoked by install.sh.
 #
 # 3x-ui's own installer (install.sh) is the SOURCE OF TRUTH for panel
 # credentials and web base path: when XUI_USERNAME/XUI_PASSWORD/
@@ -8,7 +8,7 @@
 # values itself and persists them to /etc/x-ui/install-result.env
 # (mode 600). This script deliberately does NOT pass those vars in.
 #
-# The panel PORT is the one exception: setup_nginx_proxy.sh reserves it up front (before
+# The panel PORT is the one exception: install.sh reserves it up front (before
 # installing 3x-ui) so it cannot collide with the WS/gRPC/Subscription/SSH
 # ports it also owns, and hands it here as PANEL_PORT -- which is forwarded
 # to the installer as XUI_PANEL_PORT. This script also forces
@@ -16,15 +16,15 @@
 #
 # It then reads the resulting values back out of install-result.env (the
 # panel port there should simply confirm what we asked for) and reports them
-# to setup_nginx_proxy.sh.
+# to install.sh.
 #
-# Required env vars (owned by setup_nginx_proxy.sh -- 3x-ui has no say in these):
+# Required env vars (owned by install.sh -- 3x-ui has no say in these):
 #   PANEL_PORT                   - pre-reserved panel port (see above)
 #   WS_PORT, WS_PATH             - VLESS/WS inbound
 #   GRPC_PORT, GRPC_SERVICE      - VLESS/gRPC inbound
 # Optional:
 #   CLIENT_UUID                  - reuse an existing client UUID (persisted
-#                                  across setup_nginx_proxy.sh reruns); generated if empty
+#                                  across install.sh reruns); generated if empty
 #   XUI_VERSION                  - 3x-ui release tag to install (e.g. v3.4.0,
 #                                  or dev-latest). Unset/empty installs the
 #                                  latest stable release (installer default).
@@ -35,13 +35,13 @@
 #   XUI_USERNAME=<username>
 #   XUI_PASSWORD=<password>
 #   CLIENT_UUID=<uuid>
-# setup_nginx_proxy.sh parses these key=value lines; nothing else should be relied upon.
+# install.sh parses these key=value lines; nothing else should be relied upon.
 # Human-readable progress goes to stderr.
 #
 # CLI:
 #   --uninstall   Completely remove 3x-ui (service, binary, /etc/x-ui,
 #                 /usr/local/x-ui) and exit. Does not touch Nginx/UFW/certs --
-#                 that's setup_nginx_proxy.sh --uninstall's job. Safe to run
+#                 that's install.sh --uninstall's job. Safe to run
 #                 even if 3x-ui isn't installed (no-op).
 
 set -euo pipefail
@@ -121,13 +121,13 @@ generate_uuid() {
 [[ -n "$CLIENT_SUB_ID" ]] || CLIENT_SUB_ID="$(openssl rand -hex 8)"
 
 install_xui() {
-  echo "3x-ui not found, running unattended installer (3x-ui will generate its own secure username/password/path; port ${PANEL_PORT} is pre-reserved by setup_nginx_proxy.sh)..." >&2
+  echo "3x-ui not found, running unattended installer (3x-ui will generate its own secure username/password/path; port ${PANEL_PORT} is pre-reserved by install.sh)..." >&2
   if [[ -n "$XUI_VERSION" ]]; then
     echo "Requested XUI_VERSION=${XUI_VERSION}." >&2
   fi
   # Deliberately not passing XUI_USERNAME/XUI_PASSWORD/XUI_WEB_BASE_PATH:
   # install.sh treats "unset" as "generate a secure random value", which is
-  # what we want. XUI_PANEL_PORT IS passed, since setup_nginx_proxy.sh already reserved
+  # what we want. XUI_PANEL_PORT IS passed, since install.sh already reserved
   # it to avoid colliding with WS/gRPC/Subscription/SSH ports. XUI_VERSION, if
   # set, is forwarded as install.sh's positional version argument (e.g.
   # v3.4.0 or dev-latest); unset installs the latest stable release.
@@ -151,7 +151,7 @@ read_install_result() {
   : "${XUI_WEB_BASE_PATH:?${INSTALL_RESULT_FILE} did not contain XUI_WEB_BASE_PATH}"
 
   if [[ "$XUI_PANEL_PORT" != "$PANEL_PORT" ]]; then
-    echo "WARNING: 3x-ui reports panel port ${XUI_PANEL_PORT}, but setup_nginx_proxy.sh reserved ${PANEL_PORT}." >&2
+    echo "WARNING: 3x-ui reports panel port ${XUI_PANEL_PORT}, but install.sh reserved ${PANEL_PORT}." >&2
     echo "This means 3x-ui was already installed/configured before with a different port; using ${XUI_PANEL_PORT} as reported." >&2
   fi
 }
