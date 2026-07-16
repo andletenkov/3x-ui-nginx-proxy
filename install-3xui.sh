@@ -58,6 +58,28 @@ xui_is_installed() {
   [[ -d /etc/x-ui ]] && command -v x-ui >/dev/null 2>&1
 }
 
+detect_country_flag() {
+  local country_code
+  country_code="$(curl -fsSL --max-time 5 https://ipapi.co/country/ 2>/dev/null || true)"
+
+  if [[ ! "$country_code" =~ ^[A-Z]{2}$ ]]; then
+    country_code="$(curl -fsSL --max-time 5 https://ifconfig.co/country-iso 2>/dev/null || true)"
+  fi
+  if [[ ! "$country_code" =~ ^[A-Z]{2}$ ]]; then
+    country_code="$(curl -fsSL --max-time 5 http://ip-api.com/line/?fields=countryCode 2>/dev/null || true)"
+  fi
+
+  if [[ "$country_code" =~ ^[A-Z]{2}$ ]]; then
+    local c1 c2
+    c1=$(printf '%x' $(( $(printf '%d' "'${country_code:0:1}") - 65 + 0x1F1E6 )))
+    c2=$(printf '%x' $(( $(printf '%d' "'${country_code:1:1}") - 65 + 0x1F1E6 )))
+    # shellcheck disable=SC2059
+    printf "\\U${c1}\\U${c2}"
+  else
+    printf '\xf0\x9f\x8c\x90'
+  fi
+}
+
 uninstall_xui() {
   if ! xui_is_installed && [[ ! -d /usr/local/x-ui ]] && [[ ! -f "$XUI_SERVICE_UNIT" ]]; then
     echo "3x-ui is not installed, nothing to uninstall." >&2
@@ -315,7 +337,9 @@ WSEOF
   )"
 
   echo "Creating inbound '${tag}' (WS, port ${WS_PORT}, path ${WS_PATH})..." >&2
-  xui_add_inbound "$WS_PORT" "$tag" "${INBOUND_REMARK_WS:-ws-cdn}" "$stream_settings" "client"
+  local _flag
+  _flag="$(detect_country_flag)"
+  xui_add_inbound "$WS_PORT" "$tag" "${INBOUND_REMARK_WS:-${_flag} WebSocket-CDN}" "$stream_settings" "client"
 }
 
 ensure_grpc_inbound() {
@@ -339,7 +363,9 @@ GRPCEOF
   )"
 
   echo "Creating inbound '${tag}' (gRPC, port ${GRPC_PORT}, serviceName ${GRPC_SERVICE})..." >&2
-  xui_add_inbound "$GRPC_PORT" "$tag" "${INBOUND_REMARK_GRPC:-grpc-cdn}" "$stream_settings" "client"
+  local _flag
+  _flag="$(detect_country_flag)"
+  xui_add_inbound "$GRPC_PORT" "$tag" "${INBOUND_REMARK_GRPC:-${_flag} gRPC-CDN}" "$stream_settings" "client"
 }
 
 update_geo_files() {
