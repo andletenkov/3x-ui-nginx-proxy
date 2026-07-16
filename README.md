@@ -29,7 +29,7 @@ flowchart TD
     CF -->|"HTTPS :443"| Nginx["Nginx :443 (TLS)"]
 
     subgraph VPS["VPS"]
-        UFW["UFW: allow 443 · deny 80, PANEL_PORT, WS_PORT, GRPC_PORT (SSH untouched)"]
+        UFW["UFW: allow 443 · deny 80, PANEL_PORT, WS_PORT, GRPC_PORT"]
         Nginx
         Panel["3x-ui panel — 127.0.0.1:PANEL_PORT"]
         WS["Xray WS inbound — 127.0.0.1:WS_PORT"]
@@ -74,11 +74,6 @@ You'll be prompted for the base domain, subdomains, email, internal ports
 (WS/gRPC/panel default to random free ports), WS path, gRPC service name,
 and your Cloudflare API token. A summary is shown before anything is changed
 on disk.
-
-**Note:** this script never touches SSH (no port prompt, no UFW rule for
-it) — that's entirely outside its scope. Make sure SSH is already reachable
-through UFW on your host (`ufw allow <ssh-port>/tcp`) before it enables UFW,
-or you may need console/provider access to fix a lockout.
 
 During the run, the VPS is anonymized (see [Anonymizing the VPS](#anonymizing-the-vps)
 below), 3x-ui is installed unattended (or reused if already installed), and
@@ -140,23 +135,14 @@ checks (e.g. 2ip.io's "privacy bar") key off of:
 | Service-banner fingerprinting | Suppresses the SSH pre-auth banner (nginx's `server_tokens off` is already handled by `install.sh`) |
 
 Also enables **BBR congestion control** (`net.ipv4.tcp_congestion_control=bbr`
-+ `net.core.default_qdisc=fq`) — a pure throughput improvement, not an
-anonymity measure, but bundled here since it's the same sysctl surface.
-BBR handles loss/high-latency international routes (common for
-Xray/WARP-routed traffic) noticeably better than the default `cubic`.
-Skipped gracefully if the kernel doesn't support the `tcp_bbr` module.
++ `net.core.default_qdisc=fq`) for better throughput on loss/high-latency
+routes. Skipped gracefully if the kernel doesn't support the `tcp_bbr`
+module.
 
-**What it explicitly does NOT and cannot fix** (printed as a reminder at
-the end of every run):
-
-- **IP/ASN reputation** — your VPS provider's IP range is almost certainly
-  tagged "hosting"/"datacenter" by IP-intelligence databases (2ip, ipinfo.io,
-  MaxMind, etc.), independent of any in-VM configuration. Only a
-  residential/mobile-carrier IP avoids this, which no script can grant you
-  on a VPS.
-- **Reverse DNS (PTR record)** — set via your hosting provider's control
-  panel/API, not from inside the VM.
-- **WebRTC leaks** — entirely client-side (browser), out of server scope.
+**Not fixable from inside the VPS:** IP/ASN reputation (hosting-provider IP
+ranges are flagged by IP-intelligence databases regardless of in-VM config),
+reverse DNS/PTR records (set at the hosting provider, not the VM), and
+WebRTC leaks (client-side, browser only).
 
 ### WARP outbound and routing
 
@@ -204,9 +190,7 @@ blocking/routing categories.
 `PANEL_PORT`/`SUB_PORT`/`WS_PORT`/`GRPC_PORT` must all differ from each
 other and from `443`. `PANEL_PORT` itself is only known after 3x-ui
 installs (see [Usage](#usage)) — `install.sh` re-validates it
-doesn't collide with any of the above once reported back. SSH is entirely
-out of scope for this script (see the note in [Usage](#usage)) — no port is
-prompted for it and no UFW rule is added or removed for it.
+doesn't collide with any of the above once reported back.
 
 ## Generated files
 
@@ -251,7 +235,6 @@ shellcheck + these tests on every push/PR to `main`.
 | Panel returns 502 | `ss -lntp \| grep PANEL_PORT` — is 3x-ui actually listening there? |
 | VLESS client can't connect | Confirm Xray is bound to `127.0.0.1` on the exact `WS_PORT`/`GRPC_PORT`, with matching `WS_PATH`/`GRPC_SERVICE` |
 | Certificate issuance fails | Check the Cloudflare token's permissions and `/var/log/letsencrypt/letsencrypt.log` |
-| Locked out over SSH | This script never manages SSH's UFW rule at all (by design, see [Usage](#usage)) — check whether SSH was reachable through UFW *before* running this script |
 
 Useful commands (also printed at the end of every run):
 
