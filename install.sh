@@ -10,10 +10,16 @@ PANEL_PORT=""
 SUB_PORT=""
 WS_PORT=""
 GRPC_PORT=""
+XHTTP_PORT=""
 
 WS_PATH=""
 GRPC_SERVICE=""
+XHTTP_PATH=""
 SUB_PATH=""
+
+# Optional source file for the default public fallback page on the VLESS hostname.
+# When unset, non-proxy requests deliberately retain the 404 response.
+FALLBACK_HTML_PATH="${FALLBACK_HTML_PATH:-}"
 
 CERT_DIR=""
 CF_CREDENTIALS="/etc/letsencrypt/cloudflare.ini"
@@ -26,6 +32,7 @@ XUI_PASSWORD=""
 
 NGINX_SITE="/etc/nginx/sites-available/3xui-proxy"
 NGINX_SITE_ENABLED="/etc/nginx/sites-enabled/3xui-proxy"
+FALLBACK_HTML_DEST="/etc/nginx/3xui-proxy-fallback.html"
 
 CF_REAL_IP_CONF="/etc/nginx/conf.d/cloudflare-real-ip.conf"
 CERTBOT_DEPLOY_HOOK="/etc/letsencrypt/renewal-hooks/deploy/nginx-reload.sh"
@@ -89,8 +96,10 @@ PANEL_PORT="${PANEL_PORT}"
 SUB_PORT="${SUB_PORT}"
 WS_PORT="${WS_PORT}"
 GRPC_PORT="${GRPC_PORT}"
+XHTTP_PORT="${XHTTP_PORT}"
 WS_PATH="${WS_PATH}"
 GRPC_SERVICE="${GRPC_SERVICE}"
+XHTTP_PATH="${XHTTP_PATH}"
 SUB_PATH="${SUB_PATH}"
 CLIENT_UUID="${CLIENT_UUID}"
 CLIENT_SUB_ID="${CLIENT_SUB_ID}"
@@ -213,6 +222,20 @@ normalize_ws_path() {
     die "WebSocket path may only contain letters, numbers, '/', '_' and '-'."
 }
 
+normalize_xhttp_path() {
+  XHTTP_PATH="/${XHTTP_PATH#/}"
+
+  while [[ "$XHTTP_PATH" != "/" && "$XHTTP_PATH" == */ ]]; do
+    XHTTP_PATH="${XHTTP_PATH%/}"
+  done
+
+  [[ "$XHTTP_PATH" != "/" ]] ||
+    die "XHTTP path cannot be /."
+
+  [[ "$XHTTP_PATH" =~ ^/[A-Za-z0-9/_-]*$ ]] ||
+    die "XHTTP path may only contain letters, numbers, '/', '_' and '-'."
+}
+
 normalize_sub_path() {
   SUB_PATH="/${SUB_PATH#/}"
 
@@ -249,6 +272,7 @@ validate_inputs() {
   validate_port "Subscription port" "$SUB_PORT"
   validate_port "WebSocket port" "$WS_PORT"
   validate_port "gRPC port" "$GRPC_PORT"
+  validate_port "XHTTP port" "$XHTTP_PORT"
 
   [[ "$SUB_PORT" != "$WS_PORT" ]] ||
     die "Subscription and WebSocket ports must be different."
@@ -259,12 +283,19 @@ validate_inputs() {
   [[ "$WS_PORT" != "$GRPC_PORT" ]] ||
     die "WebSocket and gRPC ports must be different."
 
+  local other_port
+  for other_port in "$SUB_PORT" "$WS_PORT" "$GRPC_PORT"; do
+    [[ "$XHTTP_PORT" != "$other_port" ]] ||
+      die "XHTTP port must be different from every other internal port."
+  done
+
   local internal_port
   local internal_port_name
   for internal_port_name_port in \
     "Subscription port:$SUB_PORT" \
     "WebSocket port:$WS_PORT" \
-    "gRPC port:$GRPC_PORT"
+    "gRPC port:$GRPC_PORT" \
+    "XHTTP port:$XHTTP_PORT"
   do
     internal_port_name="${internal_port_name_port%%:*}"
     internal_port="${internal_port_name_port#*:}"
@@ -274,6 +305,7 @@ validate_inputs() {
   done
 
   normalize_ws_path
+  normalize_xhttp_path
   normalize_sub_path
 }
 
@@ -295,6 +327,9 @@ validate_panel_port() {
   [[ "$PANEL_PORT" != "$GRPC_PORT" ]] ||
     die "3x-ui panel port ${PANEL_PORT} collides with GRPC_PORT. Change it via 'x-ui setting -port <port>' on the server, then re-run this script."
 
+  [[ "$PANEL_PORT" != "$XHTTP_PORT" ]] ||
+    die "3x-ui panel port ${PANEL_PORT} collides with XHTTP_PORT. Change it via 'x-ui setting -port <port>' on the server, then re-run this script."
+
   [[ "$PANEL_PORT" != "$SUB_PORT" ]] ||
     die "3x-ui panel port ${PANEL_PORT} collides with SUB_PORT. Change it via 'x-ui setting -port <port>' on the server, then re-run this script."
 
@@ -304,6 +339,7 @@ validate_panel_port() {
 collect_input() {
   local default_ws_port=""
   local default_grpc_port=""
+  local default_xhttp_port=""
 
   echo
   echo "=== VLESS + Nginx Setup ==="
@@ -324,6 +360,7 @@ collect_input() {
 
   default_ws_port="${WS_PORT:-$(random_free_port "$SUB_PORT")}"
   default_grpc_port="${GRPC_PORT:-$(random_free_port "$SUB_PORT" "$default_ws_port")}"
+  default_xhttp_port="${XHTTP_PORT:-$(random_free_port "$SUB_PORT" "$default_ws_port" "$default_grpc_port")}"
 
   prompt WS_PORT "WebSocket local port" "$default_ws_port"
   validate_port "WebSocket port" "$WS_PORT"
@@ -339,10 +376,17 @@ collect_input() {
     echo "WARNING: port ${GRPC_PORT} is already in use by another process on this host." >&2
   fi
 
+  prompt XHTTP_PORT "XHTTP local port" "$default_xhttp_port"
+  validate_port "XHTTP port" "$XHTTP_PORT"
+
+  if port_is_listening "$XHTTP_PORT"; then
+    echo "WARNING: port ${XHTTP_PORT} is already in use by another process on this host." >&2
+  fi
+
   # Reserve the panel port here too, BEFORE 3x-ui is installed, so it cannot
   # collide with any port already claimed above. Reused as-is on reruns
   # (loaded from CONFIG_FILE by load_config) so it stays stable.
-  PANEL_PORT="${PANEL_PORT:-$(random_free_port "443" "$SUB_PORT" "$WS_PORT" "$GRPC_PORT")}"
+  PANEL_PORT="${PANEL_PORT:-$(random_free_port "443" "$SUB_PORT" "$WS_PORT" "$GRPC_PORT" "$XHTTP_PORT")}"
   validate_port "Panel port" "$PANEL_PORT"
 
   if port_is_listening "$PANEL_PORT"; then
@@ -350,12 +394,16 @@ collect_input() {
   fi
 
   echo
-  # Auto-generate WS_PATH, GRPC_SERVICE, and SUB_PATH if not already set
+  # Auto-generate WS_PATH, XHTTP_PATH, GRPC_SERVICE, and SUB_PATH if not already set
   # (loaded from CONFIG_FILE on reruns). These are security-sensitive but
   # must look like plausible real API endpoints to avoid standing out.
   if [[ -z "$WS_PATH" ]]; then
     local ws_words=(events stream messages notifications updates sync relay)
     WS_PATH="/api/v$(( RANDOM % 3 + 1 ))/${ws_words[RANDOM % ${#ws_words[@]}]}/$(openssl rand -hex 4)"
+  fi
+  if [[ -z "$XHTTP_PATH" ]]; then
+    local xhttp_words=(telemetry ingest batch gateway upload)
+    XHTTP_PATH="/api/v$(( RANDOM % 3 + 1 ))/${xhttp_words[RANDOM % ${#xhttp_words[@]}]}/$(openssl rand -hex 4)"
   fi
   if [[ -z "$GRPC_SERVICE" ]]; then
     local grpc_orgs=(internal backend core cloud platform service)
@@ -624,20 +672,57 @@ check_port_443() {
   esac
 }
 
+prepare_fallback_page() {
+  if [[ -z "$FALLBACK_HTML_PATH" ]]; then
+    rm -f "$FALLBACK_HTML_DEST"
+    return
+  fi
+
+  [[ -f "$FALLBACK_HTML_PATH" && -r "$FALLBACK_HTML_PATH" ]] ||
+    die "FALLBACK_HTML_PATH must point to a readable regular file: ${FALLBACK_HTML_PATH}"
+
+  install -m 644 "$FALLBACK_HTML_PATH" "$FALLBACK_HTML_DEST"
+}
+
+nginx_vless_fallback_location() {
+  if [[ -n "$FALLBACK_HTML_PATH" ]]; then
+    cat <<EOF
+    location = / {
+        root /etc/nginx;
+        try_files /3xui-proxy-fallback.html =404;
+    }
+
+    location / {
+        return 404;
+    }
+EOF
+  else
+    cat <<'EOF'
+    location / {
+        return 404;
+    }
+EOF
+  fi
+}
+
 write_nginx_config() {
   echo "[6/8] Writing Nginx reverse proxy configuration..."
+
+  prepare_fallback_page
 
   check_port_443
 
   local panel_domain="${PANEL_SUBDOMAIN}.${BASE_DOMAIN}"
   local vless_domain="${VLESS_SUBDOMAIN}.${BASE_DOMAIN}"
   local grpc_location="/${GRPC_SERVICE}"
+  local vless_fallback_location
   local tmp_nginx
   local backup=""
   local default_site_was_enabled=false
   local listen_directive
 
   listen_directive="$(nginx_listen_directive)"
+  vless_fallback_location="$(nginx_vless_fallback_location)"
 
   tmp_nginx="$(make_tmp_file)"
 
@@ -675,6 +760,24 @@ server {
         proxy_send_timeout 300s;
     }
 
+    location = ${XHTTP_PATH} {
+        # Xray's XHTTP documentation recommends grpc_pass for Nginx/CDN
+        # traversal. Cloudflare's gRPC setting must be enabled for this zone.
+        grpc_pass grpc://127.0.0.1:${XHTTP_PORT};
+
+        grpc_set_header Host \$host;
+        grpc_set_header X-Real-IP \$remote_addr;
+        grpc_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        grpc_set_header X-Forwarded-Proto https;
+
+        grpc_read_timeout 600s;
+        grpc_send_timeout 600s;
+        grpc_socket_keepalive on;
+
+        client_body_buffer_size 512k;
+        client_max_body_size 0;
+    }
+
     location ${grpc_location} {
         grpc_pass grpc://127.0.0.1:${GRPC_PORT};
 
@@ -691,9 +794,7 @@ server {
         client_max_body_size 0;
     }
 
-    location / {
-        return 404;
-    }
+${vless_fallback_location}
 }
 
 server {
@@ -791,6 +892,7 @@ configure_ufw() {
   local prev_sub_port=""
   local prev_ws_port=""
   local prev_grpc_port=""
+  local prev_xhttp_port=""
 
   if [[ -f "$STATE_FILE" ]]; then
     # shellcheck disable=SC1090
@@ -799,15 +901,17 @@ configure_ufw() {
     prev_sub_port="${STATE_SUB_PORT:-}"
     prev_ws_port="${STATE_WS_PORT:-}"
     prev_grpc_port="${STATE_GRPC_PORT:-}"
+    prev_xhttp_port="${STATE_XHTTP_PORT:-}"
   fi
 
   # Remove stale deny rules left over from a previous run with different ports.
-  for stale_port in "$prev_panel_port" "$prev_sub_port" "$prev_ws_port" "$prev_grpc_port"; do
+  for stale_port in "$prev_panel_port" "$prev_sub_port" "$prev_ws_port" "$prev_grpc_port" "$prev_xhttp_port"; do
     if [[ -n "$stale_port" ]] &&
        [[ "$stale_port" != "$PANEL_PORT" ]] &&
        [[ "$stale_port" != "$SUB_PORT" ]] &&
        [[ "$stale_port" != "$WS_PORT" ]] &&
-       [[ "$stale_port" != "$GRPC_PORT" ]]; then
+       [[ "$stale_port" != "$GRPC_PORT" ]] &&
+       [[ "$stale_port" != "$XHTTP_PORT" ]]; then
       ufw delete deny "${stale_port}/tcp" || true
     fi
   done
@@ -825,6 +929,7 @@ configure_ufw() {
   ufw deny "${SUB_PORT}/tcp" || true
   ufw deny "${WS_PORT}/tcp" || true
   ufw deny "${GRPC_PORT}/tcp" || true
+  ufw deny "${XHTTP_PORT}/tcp" || true
 
   ufw --force enable
   ufw reload
@@ -834,6 +939,7 @@ STATE_PANEL_PORT=${PANEL_PORT}
 STATE_SUB_PORT=${SUB_PORT}
 STATE_WS_PORT=${WS_PORT}
 STATE_GRPC_PORT=${GRPC_PORT}
+STATE_XHTTP_PORT=${XHTTP_PORT}
 EOF
   chmod 600 "$STATE_FILE"
 }
@@ -857,6 +963,15 @@ print_summary() {
   echo "  network: ws"
   echo "  path: ${WS_PATH}"
   echo
+  echo "VLESS XHTTP:"
+  echo "  domain: ${vless_domain}"
+  echo "  public/client port: 443"
+  echo "  internal Xray port: ${XHTTP_PORT}"
+  echo "  security: tls (terminated by Nginx)"
+  echo "  network: xhttp"
+  echo "  path: ${XHTTP_PATH}"
+  echo "  Cloudflare: proxied DNS + gRPC enabled"
+  echo
   echo "VLESS gRPC:"
   echo "  domain: ${vless_domain}"
   echo "  public/client port: 443"
@@ -871,7 +986,7 @@ print_summary() {
   echo
   echo "UFW:"
   echo "  allowed: 443/tcp (SSH is left untouched by this script)"
-  echo "  denied: 80/tcp, ${PANEL_PORT}/tcp, ${SUB_PORT}/tcp, ${WS_PORT}/tcp, ${GRPC_PORT}/tcp"
+  echo "  denied: 80/tcp, ${PANEL_PORT}/tcp, ${SUB_PORT}/tcp, ${WS_PORT}/tcp, ${GRPC_PORT}/tcp, ${XHTTP_PORT}/tcp"
   echo
   echo "Files:"
   echo "  Nginx site: ${NGINX_SITE}"
@@ -885,7 +1000,7 @@ print_summary() {
   echo "  systemctl status certbot.timer"
   echo "  certbot renew --dry-run"
   echo "  ufw status verbose"
-  echo "  ss -lntp | egrep ':443|:${PANEL_PORT}|:${SUB_PORT}|:${WS_PORT}|:${GRPC_PORT}'"
+  echo "  ss -lntp | egrep ':443|:${PANEL_PORT}|:${SUB_PORT}|:${WS_PORT}|:${GRPC_PORT}|:${XHTTP_PORT}'"
 }
 
 generate_uuid() {
@@ -947,14 +1062,17 @@ install_3xui_and_inbounds() {
     WS_PATH="$WS_PATH" \
     GRPC_PORT="$GRPC_PORT" \
     GRPC_SERVICE="$GRPC_SERVICE" \
+    XHTTP_PORT="$XHTTP_PORT" \
+    XHTTP_PATH="$XHTTP_PATH" \
     SUB_PORT="$SUB_PORT" \
     SUB_PATH="$SUB_PATH" \
     SUB_DOMAIN="${PANEL_SUBDOMAIN}.${BASE_DOMAIN}" \
     VLESS_DOMAIN="${VLESS_SUBDOMAIN}.${BASE_DOMAIN}" \
     CLIENT_UUID="$CLIENT_UUID" \
     CLIENT_SUB_ID="$CLIENT_SUB_ID" \
-    INBOUND_REMARK_WS="$INBOUND_REMARK_WS" \
-    INBOUND_REMARK_GRPC="$INBOUND_REMARK_GRPC" \
+    INBOUND_REMARK_WS="${INBOUND_REMARK_WS:-}" \
+    INBOUND_REMARK_GRPC="${INBOUND_REMARK_GRPC:-}" \
+    INBOUND_REMARK_XHTTP="${INBOUND_REMARK_XHTTP:-}" \
     XUI_VERSION="${XUI_VERSION:-}" \
     "$installer_script"
   )" || die "install-3xui.sh failed."
@@ -1006,6 +1124,7 @@ print_client_links() {
   echo "=== Client VLESS URIs (ready to import into your client app) ==="
   echo "vless://${CLIENT_UUID}@${VLESS_SUBDOMAIN}.${BASE_DOMAIN}:443?type=ws&security=tls&path=$(printf '%s' "$WS_PATH" | sed 's#/#%2F#g')&host=${VLESS_SUBDOMAIN}.${BASE_DOMAIN}#${INBOUND_REMARK_WS}"
   echo "vless://${CLIENT_UUID}@${VLESS_SUBDOMAIN}.${BASE_DOMAIN}:443?type=grpc&security=tls&serviceName=${GRPC_SERVICE}&mode=gun&host=${VLESS_SUBDOMAIN}.${BASE_DOMAIN}#${INBOUND_REMARK_GRPC}"
+  echo "vless://${CLIENT_UUID}@${VLESS_SUBDOMAIN}.${BASE_DOMAIN}:443?type=xhttp&security=tls&path=$(printf '%s' "$XHTTP_PATH" | sed 's#/#%2F#g')&mode=packet-up&host=${VLESS_SUBDOMAIN}.${BASE_DOMAIN}#${INBOUND_REMARK_XHTTP}"
 }
 
 verify_deployment() {
@@ -1018,7 +1137,7 @@ verify_deployment() {
   echo
   echo "Checking local listeners..."
 
-  for check in "Panel:$PANEL_PORT" "Subscription:$SUB_PORT" "WebSocket:$WS_PORT" "gRPC:$GRPC_PORT"; do
+  for check in "Panel:$PANEL_PORT" "Subscription:$SUB_PORT" "WebSocket:$WS_PORT" "gRPC:$GRPC_PORT" "XHTTP:$XHTTP_PORT"; do
     local check_name="${check%%:*}"
     local check_port="${check#*:}"
 
@@ -1064,7 +1183,7 @@ verify_deployment() {
   else
     echo "Some checks failed. Verify your 3x-ui/Xray configuration matches the ports/paths above,"
     echo "then re-run the checks manually:"
-    echo "  ss -lntp | egrep ':${PANEL_PORT}|:${SUB_PORT}|:${WS_PORT}|:${GRPC_PORT}'"
+    echo "  ss -lntp | egrep ':${PANEL_PORT}|:${SUB_PORT}|:${WS_PORT}|:${GRPC_PORT}|:${XHTTP_PORT}'"
     echo "  curl -vk https://${panel_domain}${PANEL_PATH}/"
     echo "  curl -vk https://${vless_domain}/"
   fi
@@ -1101,7 +1220,7 @@ uninstall_all() {
 
   echo
   echo "--- Nginx ---"
-  rm -f "$NGINX_SITE_ENABLED" "$NGINX_SITE" "$CF_REAL_IP_CONF"
+  rm -f "$NGINX_SITE_ENABLED" "$NGINX_SITE" "$CF_REAL_IP_CONF" "$FALLBACK_HTML_DEST"
   if command -v nginx >/dev/null 2>&1; then
     nginx -t >/dev/null 2>&1 && (systemctl reload nginx || systemctl restart nginx) || true
   fi
@@ -1122,7 +1241,7 @@ uninstall_all() {
     # never removes one either (see configure_ufw).
     ufw delete allow 443/tcp >/dev/null 2>&1 || true
     ufw delete deny 80/tcp >/dev/null 2>&1 || true
-    for p in "${PANEL_PORT:-}" "${SUB_PORT:-}" "${WS_PORT:-}" "${GRPC_PORT:-}"; do
+    for p in "${PANEL_PORT:-}" "${SUB_PORT:-}" "${WS_PORT:-}" "${GRPC_PORT:-}" "${XHTTP_PORT:-}"; do
       [[ -n "$p" ]] && ufw delete deny "${p}/tcp" >/dev/null 2>&1 || true
     done
     ufw reload >/dev/null 2>&1 || true
@@ -1170,6 +1289,7 @@ main() {
   VPS_FLAG="$(detect_country_flag)"
   INBOUND_REMARK_WS="${VPS_FLAG} WebSocket-CDN"
   INBOUND_REMARK_GRPC="${VPS_FLAG} gRPC-CDN"
+  INBOUND_REMARK_XHTTP="${VPS_FLAG} XHTTP-CDN"
 
   install_packages
   anonymize_vps

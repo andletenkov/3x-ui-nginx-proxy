@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex, nofollow">
+  <title>Edge Delivery</title>
+  <style>
+    :root { --ink:#172033; --muted:#64748b; --line:#e2e8f0; --navy:#0f2747; --surface:#fff; --page:#f8fafc; }
+    * { box-sizing:border-box; }
+    body { margin:0; background:var(--page); color:var(--ink); font:15px/1.55 Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif; }
+    header { background:var(--navy); color:#fff; }
+    .wrap { width:min(960px,calc(100% - 40px)); margin:auto; }
+    .top { min-height:68px; display:flex; align-items:center; justify-content:space-between; gap:20px; }
+    .brand { font-weight:650; letter-spacing:.01em; }
+    .brand small { display:block; color:#bfdbfe; font-size:12px; font-weight:500; }
+    .status { display:inline-flex; align-items:center; gap:7px; color:#dcfce7; font-size:13px; }
+    .dot { width:8px; height:8px; border-radius:50%; background:#4ade80; box-shadow:0 0 0 3px rgb(74 222 128 / .16); }
+    main { padding:72px 0 56px; }
+    h1 { max-width:650px; margin:0 0 14px; font-size:clamp(30px,5vw,46px); letter-spacing:-.035em; line-height:1.12; }
+    .lead { max-width:650px; margin:0; color:var(--muted); font-size:18px; }
+    .grid { display:grid; grid-template-columns:repeat(3,1fr); gap:16px; margin-top:42px; }
+    .card { padding:20px; border:1px solid var(--line); border-radius:10px; background:var(--surface); }
+    .card h2 { margin:0 0 7px; font-size:15px; }
+    .card p { margin:0; color:var(--muted); font-size:14px; }
+    .notice { margin-top:28px; padding:15px 18px; border:1px solid #bbf7d0; border-radius:9px; background:#f0fdf4; color:#166534; }
+    footer { border-top:1px solid var(--line); color:var(--muted); font-size:13px; }
+    footer .wrap { padding:22px 0; }
+    @media (max-width:680px) { main { padding-top:48px; } .grid { grid-template-columns:1fr; } }
+  </style>
+</head>
+<body>
+  <header><div class="wrap top"><div class="brand">Edge Delivery<small>Regional service endpoint</small></div><div class="status"><span class="dot"></span>Operational</div></div></header>
+  <main class="wrap">
+    <h1>Edge delivery, close to your users.</h1>
+    <p class="lead">This endpoint provides reliable delivery for application resources, service updates, and static content.</p>
+    <section class="grid" aria-label="Service overview">
+      <article class="card"><h2>Content delivery</h2><p>Optimized routing for versioned assets and application resources.</p></article>
+      <article class="card"><h2>Service gateway</h2><p>Reliable HTTPS delivery with origin health monitoring.</p></article>
+      <article class="card"><h2>Regional edge</h2><p>Low-latency access for connected applications and clients.</p></article>
+    </section>
+    <p class="notice"><strong>All systems operational.</strong> No active maintenance window.</p>
+  </main>
+  <footer><div class="wrap">Edge delivery service</div></footer>
+</body>
+</html>

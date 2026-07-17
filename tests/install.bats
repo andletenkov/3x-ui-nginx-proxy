@@ -104,6 +104,19 @@ setup() {
   [ "$status" -eq 1 ]
 }
 
+@test "normalize_xhttp_path normalizes an API path" {
+  XHTTP_PATH="api/v1/ingest/abcd1234///"
+  normalize_xhttp_path
+  [ "$XHTTP_PATH" == "/api/v1/ingest/abcd1234" ]
+}
+
+@test "normalize_xhttp_path rejects bare root path" {
+  XHTTP_PATH="/"
+  run normalize_xhttp_path
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"XHTTP path cannot be /"* ]]
+}
+
 # ---------------------------------------------------------------------------
 # validate_inputs
 # ---------------------------------------------------------------------------
@@ -118,8 +131,10 @@ valid_inputs() {
   SUB_PORT="2096"
   WS_PORT="10001"
   GRPC_PORT="10002"
+  XHTTP_PORT="10003"
   WS_PATH="/api/v1/events"
   GRPC_SERVICE="api.v1.SyncService"
+  XHTTP_PATH="/api/v1/ingest/abcd1234"
   SUB_PATH="/sub"
 }
 
@@ -183,6 +198,14 @@ valid_inputs() {
   run validate_inputs
   [ "$status" -eq 1 ]
   [[ "$output" == *"cannot be 443"* ]]
+}
+
+@test "validate_inputs rejects an XHTTP port collision" {
+  valid_inputs
+  XHTTP_PORT="$GRPC_PORT"
+  run validate_inputs
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"XHTTP port must be different"* ]]
 }
 
 # ---------------------------------------------------------------------------
@@ -319,6 +342,8 @@ nginx_config_env() {
   SUB_PORT="2096"
   WS_PORT="10001"
   GRPC_PORT="10002"
+  XHTTP_PORT="10003"
+  XHTTP_PATH="/api/v1/ingest/abcd1234"
   CERT_DIR="/tmp/fake-cert"
   NGINX_SITE="${BATS_TEST_TMPDIR}/3xui-proxy"
   NGINX_SITE_ENABLED="${BATS_TEST_TMPDIR}/3xui-proxy-enabled"
@@ -332,11 +357,50 @@ nginx_config_env() {
 
   grep -q "proxy_pass http://127.0.0.1:10001;" "$NGINX_SITE"
   grep -q "grpc_pass grpc://127.0.0.1:10002;" "$NGINX_SITE"
+  grep -q "grpc_pass grpc://127.0.0.1:10003;" "$NGINX_SITE"
   grep -q "proxy_pass http://127.0.0.1:2053;" "$NGINX_SITE"
   grep -q "location = /api/v1/events" "$NGINX_SITE"
+  grep -q "location = /api/v1/ingest/abcd1234" "$NGINX_SITE"
   grep -q "location /api.v1.SyncService" "$NGINX_SITE"
   grep -q "server_name admin.example.com;" "$NGINX_SITE"
   grep -q "server_name vpn.example.com;" "$NGINX_SITE"
+}
+
+@test "write_nginx_config defaults the VLESS fallback to 404" {
+  nginx_config_env
+  FALLBACK_HTML_PATH=""
+  FALLBACK_HTML_DEST="${BATS_TEST_TMPDIR}/fallback.html"
+  run write_nginx_config
+  [ "$status" -eq 0 ]
+
+  grep -q "return 404;" "$NGINX_SITE"
+  [ ! -e "$FALLBACK_HTML_DEST" ]
+}
+
+@test "prepare_fallback_page rejects a missing source file" {
+  FALLBACK_HTML_PATH="${BATS_TEST_TMPDIR}/missing.html"
+  FALLBACK_HTML_DEST="${BATS_TEST_TMPDIR}/fallback.html"
+
+  run prepare_fallback_page
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"FALLBACK_HTML_PATH must point to a readable regular file"* ]]
+  [ ! -e "$FALLBACK_HTML_DEST" ]
+}
+
+@test "write_nginx_config serves an optional fallback HTML page" {
+  nginx_config_env
+  local source_html="${BATS_TEST_TMPDIR}/source.html"
+  printf '<h1>Fallback</h1>\n' > "$source_html"
+  FALLBACK_HTML_PATH="$source_html"
+  FALLBACK_HTML_DEST="${BATS_TEST_TMPDIR}/fallback.html"
+  run write_nginx_config
+  [ "$status" -eq 0 ]
+
+  [ "$(cat "$FALLBACK_HTML_DEST")" = "<h1>Fallback</h1>" ]
+  grep -q "location = /" "$NGINX_SITE"
+  grep -q "try_files /3xui-proxy-fallback.html =404;" "$NGINX_SITE"
+  grep -q "location / {" "$NGINX_SITE"
+  grep -q "return 404;" "$NGINX_SITE"
 }
 
 @test "write_nginx_config includes gRPC keepalive and buffer settings" {
@@ -508,6 +572,10 @@ cf_real_ip_env() {
   CLIENT_UUID="11111111-2222-3333-4444-555555555555"
   WS_PATH="/api/v1/events"
   GRPC_SERVICE="api.v1.SyncService"
+  XHTTP_PATH="/api/v1/ingest/abcd1234"
+  INBOUND_REMARK_WS="ws-cdn"
+  INBOUND_REMARK_GRPC="grpc-cdn"
+  INBOUND_REMARK_XHTTP="xhttp-cdn"
   VLESS_SUBDOMAIN="vpn"
 
   run print_client_links
@@ -518,10 +586,14 @@ cf_real_ip_env() {
   [[ "$output" == *"https://admin.example.com/rand0mBaseP4th/"* ]]
 }
 
-@test "print_client_links emits WS and gRPC vless:// URIs with TLS and correct host, using the same client UUID" {
+@test "print_client_links emits WS, gRPC, and XHTTP VLESS URIs with TLS and correct host" {
   CLIENT_UUID="11111111-2222-3333-4444-555555555555"
   WS_PATH="/api/v1/events"
   GRPC_SERVICE="api.v1.SyncService"
+  XHTTP_PATH="/api/v1/ingest/abcd1234"
+  INBOUND_REMARK_WS="ws-cdn"
+  INBOUND_REMARK_GRPC="grpc-cdn"
+  INBOUND_REMARK_XHTTP="xhttp-cdn"
   VLESS_SUBDOMAIN="vpn"
   BASE_DOMAIN="example.com"
   XUI_USERNAME="u"
@@ -534,6 +606,7 @@ cf_real_ip_env() {
 
   [[ "$output" == *"vless://11111111-2222-3333-4444-555555555555@vpn.example.com:443?type=ws&security=tls&path=%2Fapi%2Fv1%2Fevents&host=vpn.example.com#ws-cdn"* ]]
   [[ "$output" == *"vless://11111111-2222-3333-4444-555555555555@vpn.example.com:443?type=grpc&security=tls&serviceName=api.v1.SyncService&mode=gun&host=vpn.example.com#grpc-cdn"* ]]
+  [[ "$output" == *"vless://11111111-2222-3333-4444-555555555555@vpn.example.com:443?type=xhttp&security=tls&path=%2Fapi%2Fv1%2Fingest%2Fabcd1234&mode=packet-up&host=vpn.example.com#xhttp-cdn"* ]]
 
   unique_uuid_count=$(printf '%s\n' "$output" \
     | grep -oE '[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}' \
@@ -981,6 +1054,14 @@ setup_uninstall_fixtures() {
   WS_PATH="/api/v$(( RANDOM % 3 + 1 ))/${ws_words[RANDOM % ${#ws_words[@]}]}/$(openssl rand -hex 4)"
 
   [[ "$WS_PATH" =~ ^/api/v[123]/[a-z]+/[0-9a-f]{8}$ ]]
+}
+
+@test "auto-generated XHTTP_PATH looks like a real API endpoint" {
+  XHTTP_PATH=""
+  local xhttp_words=(telemetry ingest batch gateway upload)
+  XHTTP_PATH="/api/v$(( RANDOM % 3 + 1 ))/${xhttp_words[RANDOM % ${#xhttp_words[@]}]}/$(openssl rand -hex 4)"
+
+  [[ "$XHTTP_PATH" =~ ^/api/v[123]/[a-z]+/[0-9a-f]{8}$ ]]
 }
 
 @test "auto-generated GRPC_SERVICE looks like a real gRPC service name" {

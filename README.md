@@ -4,7 +4,7 @@
 ![License](https://img.shields.io/github/license/andletenkov/3x-ui-nginx-proxy)
 
 Interactive setup that installs **3x-ui** (unattended) and puts **Nginx** in
-front of its panel and VLESS/WS + VLESS/gRPC **Xray** inbounds, behind
+front of its panel and VLESS/WS + VLESS/gRPC + VLESS/XHTTP **Xray** inbounds, behind
 **Cloudflare**, with a **Let's Encrypt wildcard certificate** (DNS-01) and a
 locked-down **UFW** firewall.
 
@@ -34,11 +34,13 @@ flowchart TD
         Panel["3x-ui panel — 127.0.0.1:PANEL_PORT"]
         WS["Xray WS inbound — 127.0.0.1:WS_PORT"]
         GRPC["Xray gRPC inbound — 127.0.0.1:GRPC_PORT"]
+    XHTTP["Xray XHTTP inbound — 127.0.0.1:XHTTP_PORT"]
     end
 
     Nginx -->|"admin.domain, path PANEL_PATH"| Panel
     Nginx -->|"vpn.domain, path WS_PATH"| WS
     Nginx -->|"vpn.domain, service GRPC_SERVICE"| GRPC
+    Nginx -->|"vpn.domain, path XHTTP_PATH"| XHTTP
 ```
 
 Two `server{}` blocks are generated, both on port 443 with the same wildcard
@@ -47,9 +49,19 @@ cert, split by `server_name`:
 | Domain | Purpose | Backend |
 |---|---|---|
 | `<PANEL_SUBDOMAIN>.<BASE_DOMAIN>` | 3x-ui panel | `127.0.0.1:PANEL_PORT` |
-| `<VLESS_SUBDOMAIN>.<BASE_DOMAIN>` | VLESS WebSocket + gRPC | `127.0.0.1:WS_PORT` / `127.0.0.1:GRPC_PORT` |
+| `<VLESS_SUBDOMAIN>.<BASE_DOMAIN>` | VLESS WebSocket + gRPC + XHTTP | `127.0.0.1:WS_PORT` / `127.0.0.1:GRPC_PORT` / `127.0.0.1:XHTTP_PORT` |
 
-Everything else on either domain returns `404`.
+Everything else returns `404` by default. To serve a fallback page from the VLESS hostname, provide a readable local HTML file when installing. A generic example is included at `examples/fallback.html`:
+
+```bash
+sudo FALLBACK_HTML_PATH=./examples/fallback.html ./install.sh
+```
+
+The file is copied to `/etc/nginx/3xui-proxy-fallback.html` (mode `0644`) and served only for the VLESS host's `/` route; all other unmatched routes return `404`. Re-run without `FALLBACK_HTML_PATH` to restore `404` everywhere.
+
+### XHTTP through Cloudflare
+
+The generated XHTTP inbound uses `network: xhttp`, `security: none` at the loopback Xray listener, and `xhttpSettings: { path, mode: "packet-up" }`. Nginx terminates TLS and forwards the exact XHTTP path with `grpc_pass` to the loopback port. Keep the VLESS DNS record **proxied** (orange cloud) and enable **Network → gRPC** in the Cloudflare zone. `packet-up` is selected because Xray documents it as the most compatible mode for CDN/reverse-proxy traversal. The generated client URI uses TLS, the same path, and `mode=packet-up`.
 
 ## Prerequisites
 

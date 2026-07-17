@@ -22,6 +22,7 @@
 #   PANEL_PORT                   - pre-reserved panel port (see above)
 #   WS_PORT, WS_PATH             - VLESS/WS inbound
 #   GRPC_PORT, GRPC_SERVICE      - VLESS/gRPC inbound
+#   XHTTP_PORT, XHTTP_PATH        - VLESS/XHTTP inbound (behind Nginx/CDN)
 # Optional:
 #   CLIENT_UUID                  - reuse an existing client UUID (persisted
 #                                  across install.sh reruns); generated if empty
@@ -127,6 +128,8 @@ fi
 : "${WS_PATH:?WS_PATH is required}"
 : "${GRPC_PORT:?GRPC_PORT is required}"
 : "${GRPC_SERVICE:?GRPC_SERVICE is required}"
+: "${XHTTP_PORT:?XHTTP_PORT is required}"
+: "${XHTTP_PATH:?XHTTP_PATH is required}"
 : "${SUB_PORT:?SUB_PORT is required}"
 : "${SUB_PATH:?SUB_PATH is required}"
 
@@ -355,6 +358,41 @@ WSEOF
   local _flag
   _flag="$(detect_country_flag)"
   xui_add_inbound "$WS_PORT" "$tag" "${INBOUND_REMARK_WS:-${_flag} WebSocket-CDN}" "$stream_settings" "client"
+}
+
+ensure_xhttp_inbound() {
+  local tag="in-${XHTTP_PORT}-xhttp"
+
+  if xui_inbound_exists "$tag"; then
+    echo "Inbound '${tag}' already exists, skipping." >&2
+    return
+  fi
+
+  local stream_settings
+  export XHTTP_PATH_ARG="$XHTTP_PATH" EXT_DOMAIN="${VLESS_DOMAIN:-}"
+  stream_settings="$(python3 << 'XHTTPEOF'
+import json,os
+settings = {
+    'network': 'xhttp',
+    'security': 'none',
+    # packet-up is the most compatible mode for a CDN/reverse-proxy path.
+    'xhttpSettings': {'path': os.environ['XHTTP_PATH_ARG'], 'mode': 'packet-up'},
+}
+if os.environ.get('EXT_DOMAIN'):
+    settings['externalProxy'] = [{
+        'forceTls': 'tls',
+        'dest': os.environ['EXT_DOMAIN'],
+        'port': 443,
+        'remark': '',
+    }]
+print(json.dumps(settings))
+XHTTPEOF
+  )"
+
+  echo "Creating inbound '${tag}' (XHTTP, port ${XHTTP_PORT}, path ${XHTTP_PATH})..." >&2
+  local _flag
+  _flag="$(detect_country_flag)"
+  xui_add_inbound "$XHTTP_PORT" "$tag" "${INBOUND_REMARK_XHTTP:-${_flag} XHTTP-CDN}" "$stream_settings" "client"
 }
 
 ensure_grpc_inbound() {
@@ -684,6 +722,7 @@ main() {
   wait_for_panel
   setup_api_auth
   ensure_ws_inbound
+  ensure_xhttp_inbound
   ensure_grpc_inbound
   configure_subscription
   configure_xray_config
