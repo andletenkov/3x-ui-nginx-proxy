@@ -826,7 +826,7 @@ setup_uninstall_fixtures() {
   grep -q "delete deny 51236/tcp" "$UFW_LOG"
 }
 
-@test "uninstall_all deletes the certbot cert for BASE_DOMAIN" {
+@test "uninstall_all keeps the certbot cert by default" {
   setup_uninstall_fixtures
 
   local installer_stub="${BATS_TEST_TMPDIR}/install-3xui.sh"
@@ -835,6 +835,23 @@ setup_uninstall_fixtures() {
 
   export CERTBOT_LOG="${BATS_TEST_TMPDIR}/certbot.log"
   : > "$CERTBOT_LOG"
+
+  run uninstall_all <<< "y"
+  [ "$status" -eq 0 ]
+
+  ! grep -q "delete --cert-name example.com" "$CERTBOT_LOG"
+}
+
+@test "uninstall_all deletes the certbot cert when DELETE_CERT=true" {
+  setup_uninstall_fixtures
+
+  local installer_stub="${BATS_TEST_TMPDIR}/install-3xui.sh"
+  write_uninstall_stub "$installer_stub" "${BATS_TEST_TMPDIR}/installer-called"
+  export INSTALL_3XUI_SCRIPT="$installer_stub"
+
+  export CERTBOT_LOG="${BATS_TEST_TMPDIR}/certbot.log"
+  : > "$CERTBOT_LOG"
+  export DELETE_CERT=true
 
   run uninstall_all <<< "y"
   [ "$status" -eq 0 ]

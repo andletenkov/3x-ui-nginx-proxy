@@ -1075,16 +1075,22 @@ uninstall_all() {
   script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
   installer_script="${INSTALL_3XUI_SCRIPT:-${script_dir}/install-3xui.sh}"
   anonymize_script="${ANONYMIZE_SCRIPT:-${script_dir}/anonymize.sh}"
+  DELETE_CERT="${DELETE_CERT:-false}"
 
   require_root
   load_config
 
   echo "=== Uninstalling 3x-ui-nginx-proxy ==="
   echo "This removes: the Nginx site/Cloudflare-real-IP config, the Certbot"
-  echo "deploy hook and certificate for '${BASE_DOMAIN:-<unknown -- none configured>}',"
-  echo "the Cloudflare API token file, the UFW rules this script added, 3x-ui"
-  echo "itself (service, binary, /etc/x-ui, /usr/local/x-ui), and this script's"
-  echo "saved config/state files."
+  echo "deploy hook, the Cloudflare API token file, the UFW rules this script"
+  echo "added, 3x-ui itself (service, binary, /etc/x-ui, /usr/local/x-ui), and"
+  echo "this script's saved config/state files."
+  echo
+  echo "The Let's Encrypt certificate for '${BASE_DOMAIN:-<unknown -- none configured>}'"
+  echo "is KEPT by default (Let's Encrypt rate-limits reissuance to 5 certs per"
+  echo "exact domain set per 7 days -- deleting it needlessly on every"
+  echo "uninstall/reinstall cycle burns that quota). Pass --delete-cert to also"
+  echo "remove it."
   echo
   read -r -p "Continue? [y/N]: " answer
 
@@ -1102,8 +1108,11 @@ uninstall_all() {
 
   echo "--- Certbot ---"
   rm -f "$CERTBOT_DEPLOY_HOOK"
-  if [[ -n "${BASE_DOMAIN:-}" ]] && command -v certbot >/dev/null 2>&1; then
+  if [[ "$DELETE_CERT" == true ]] && [[ -n "${BASE_DOMAIN:-}" ]] && command -v certbot >/dev/null 2>&1; then
+    echo "Deleting certificate for ${BASE_DOMAIN} (--delete-cert was passed)..."
     certbot delete --cert-name "$BASE_DOMAIN" --non-interactive >/dev/null 2>&1 || true
+  else
+    echo "Keeping existing certificate for ${BASE_DOMAIN:-<unknown>} (pass --delete-cert to remove it)."
   fi
   rm -f "$CF_CREDENTIALS"
 
@@ -1142,6 +1151,9 @@ uninstall_all() {
 
 main() {
   if [[ "${1:-}" == "--uninstall" ]]; then
+    if [[ "${2:-}" == "--delete-cert" ]]; then
+      DELETE_CERT=true
+    fi
     uninstall_all
     return
   fi

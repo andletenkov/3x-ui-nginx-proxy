@@ -100,11 +100,19 @@ sudo ./install.sh --uninstall
 ```
 
 Removes everything both scripts set up: the Nginx site and Cloudflare
-real-IP config, the Certbot deploy hook and certificate for `BASE_DOMAIN`,
-the Cloudflare API token file, the UFW rules this script added, 3x-ui itself
-(service, binary, `/etc/x-ui`, `/usr/local/x-ui`), and the saved
-config/state files. Asks for confirmation first. Safe to run even if some
-pieces were never installed.
+real-IP config, the Certbot deploy hook, the Cloudflare API token file, the
+UFW rules this script added, 3x-ui itself (service, binary, `/etc/x-ui`,
+`/usr/local/x-ui`), and the saved config/state files. Asks for confirmation
+first. Safe to run even if some pieces were never installed.
+
+The Let's Encrypt certificate is **kept by default** — Let's Encrypt only
+allows 5 certificate issuances per exact domain set per 7 days, so deleting
+it on every uninstall/reinstall cycle burns that quota fast. Pass
+`--delete-cert` to also remove it:
+
+```bash
+sudo ./install.sh --uninstall --delete-cert
+```
 
 `install-3xui.sh --uninstall` can also be run directly to remove just 3x-ui
 (service, binary, `/etc/x-ui`, `/usr/local/x-ui`) without touching
