@@ -1,18 +1,18 @@
 #!/usr/bin/env bats
 #
-# Unit tests for install.sh.
+# Unit tests for setup.sh.
 #
 # Run with:
-#   bats tests/setup.bats
+#   bats tests/install.bats tests/anonymize.bats
 #
 # These tests stub out all system-mutating commands (nginx, curl, ss, ufw,
-# certbot, systemctl, apt) via tests/stubs/ on PATH, and source install.sh
+# certbot, systemctl, apt) via tests/stubs/ on PATH, and source setup.sh
 # without executing main() (guarded by the BASH_SOURCE check at the bottom
 # of the script). No root privileges or real system changes are required.
 
 setup() {
   export PATH="${BATS_TEST_DIRNAME}/stubs:$PATH"
-  export SCRIPT="${BATS_TEST_DIRNAME}/../install.sh"
+  export SCRIPT="${BATS_TEST_DIRNAME}/../setup.sh"
 
   # shellcheck disable=SC1090
   source "$SCRIPT"
@@ -360,10 +360,19 @@ nginx_config_env() {
   grep -q "grpc_pass grpc://127.0.0.1:10003;" "$NGINX_SITE"
   grep -q "proxy_pass http://127.0.0.1:2053;" "$NGINX_SITE"
   grep -q "location = /api/v1/events" "$NGINX_SITE"
-  grep -q "location = /api/v1/ingest/abcd1234" "$NGINX_SITE"
+  grep -q "location \^~ /api/v1/ingest/abcd1234" "$NGINX_SITE"
   grep -q "location /api.v1.SyncService" "$NGINX_SITE"
   grep -q "server_name admin.example.com;" "$NGINX_SITE"
   grep -q "server_name vpn.example.com;" "$NGINX_SITE"
+}
+
+@test "write_nginx_config matches XHTTP packet-up session subpaths" {
+  nginx_config_env
+  run write_nginx_config
+  [ "$status" -eq 0 ]
+
+  grep -q "location \^~ /api/v1/ingest/abcd1234" "$NGINX_SITE"
+  ! grep -q "location = /api/v1/ingest/abcd1234" "$NGINX_SITE"
 }
 
 @test "write_nginx_config defaults the VLESS fallback to 404" {
@@ -413,6 +422,24 @@ nginx_config_env() {
   grep -q "grpc_send_timeout 600s;" "$NGINX_SITE"
   grep -q "client_body_buffer_size 512k;" "$NGINX_SITE"
   grep -q "client_max_body_size 0;" "$NGINX_SITE"
+}
+
+@test "configure_ufw allows TCP 443 only from current Cloudflare ranges" {
+  nginx_config_env
+  STATE_FILE="${BATS_TEST_TMPDIR}/ports.state"
+  CF_IP_STATE_FILE="${BATS_TEST_TMPDIR}/cloudflare-ips.state"
+  CF_IP_RANGES=("173.245.48.0/20" "2400:cb00::/32")
+  export UFW_LOG="${BATS_TEST_TMPDIR}/ufw.log"
+  : > "$UFW_LOG"
+
+  configure_ufw
+
+  grep -q "allow from 173.245.48.0/20 to any port 443 proto tcp" "$UFW_LOG"
+  grep -q "allow from 2400:cb00::/32 to any port 443 proto tcp" "$UFW_LOG"
+  grep -q "delete allow 443/tcp" "$UFW_LOG"
+  grep -q "deny 443/tcp" "$UFW_LOG"
+  grep -qx "173.245.48.0/20" "$CF_IP_STATE_FILE"
+  grep -qx "2400:cb00::/32" "$CF_IP_STATE_FILE"
 }
 
 @test "write_nginx_config's panel proxy_pass has no trailing slash (preserves base path prefix)" {
@@ -616,6 +643,18 @@ cf_real_ip_env() {
 }
 
 # ---------------------------------------------------------------------------
+# install-3xui payload contract
+# ---------------------------------------------------------------------------
+
+@test "install-3xui explicitly enables generated VLESS clients" {
+  local installer="${BATS_TEST_DIRNAME}/../setup-3x-ui.sh"
+
+  run grep -A25 "'clients': \[{" "$installer"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"'enable': True"* ]]
+}
+
+# ---------------------------------------------------------------------------
 # install_3xui_and_inbounds -- stubs the real install-3xui.sh via
 # INSTALL_3XUI_SCRIPT so no network/root access is required.
 # ---------------------------------------------------------------------------
@@ -762,7 +801,7 @@ EOF
   [[ "$output" == *"did not report PANEL_PORT"* ]]
 }
 
-@test "install_3xui_and_inbounds dies if install-3xui.sh itself fails" {
+@test "install_3xui_and_inbounds dies if setup-3x-ui.sh itself fails" {
   PANEL_PORT="51234"
   WS_PORT="51235"
   WS_PATH="/api/v1/events"
@@ -777,11 +816,11 @@ echo "boom" >&2
 exit 1
 EOF
   chmod +x "$stub"
-  export INSTALL_3XUI_SCRIPT="$stub"
+  export SETUP_3X_UI_SCRIPT="$stub"
 
   run install_3xui_and_inbounds
   [ "$status" -eq 1 ]
-  [[ "$output" == *"install-3xui.sh failed"* ]]
+  [[ "$output" == *"setup-3x-ui.sh failed"* ]]
 }
 
 @test "install_3xui_and_inbounds forwards XUI_VERSION to install-3xui.sh" {
@@ -838,6 +877,7 @@ setup_uninstall_fixtures() {
   NGINX_SITE="${BATS_TEST_TMPDIR}/3xui-proxy"
   NGINX_SITE_ENABLED="${BATS_TEST_TMPDIR}/3xui-proxy-enabled"
   CF_REAL_IP_CONF="${BATS_TEST_TMPDIR}/cloudflare-real-ip.conf"
+  CF_IP_STATE_FILE="${BATS_TEST_TMPDIR}/cloudflare-ips.state"
   CERTBOT_DEPLOY_HOOK="${BATS_TEST_TMPDIR}/nginx-reload.sh"
   CF_CREDENTIALS="${BATS_TEST_TMPDIR}/cloudflare.ini"
   BASE_DOMAIN="example.com"
@@ -892,6 +932,7 @@ setup_uninstall_fixtures() {
   [ "$status" -eq 0 ]
 
   grep -q "delete allow 443/tcp" "$UFW_LOG"
+  grep -q "delete deny 443/tcp" "$UFW_LOG"
   grep -q "delete deny 80/tcp" "$UFW_LOG"
   grep -q "delete deny 51234/tcp" "$UFW_LOG"
   grep -q "delete deny 2096/tcp" "$UFW_LOG"
@@ -1083,42 +1124,42 @@ setup_uninstall_fixtures() {
 }
 
 # ---------------------------------------------------------------------------
-# anonymize_vps -- stubs the real anonymize.sh via ANONYMIZE_SCRIPT so no
+# anonymize_vps -- stubs harden-host.sh via HARDEN_HOST_SCRIPT so no
 # root/network access is required.
 # ---------------------------------------------------------------------------
 
-@test "anonymize_vps invokes anonymize.sh next to install.sh" {
-  local marker="${BATS_TEST_TMPDIR}/anonymize-called"
-  local stub="${BATS_TEST_TMPDIR}/anonymize.sh"
+@test "anonymize_vps invokes harden-host.sh next to setup.sh" {
+  local marker="${BATS_TEST_TMPDIR}/harden-host-called"
+  local stub="${BATS_TEST_TMPDIR}/harden-host.sh"
   write_uninstall_stub "$stub" "$marker"
-  export ANONYMIZE_SCRIPT="$stub"
+  export HARDEN_HOST_SCRIPT="$stub"
 
   run anonymize_vps
   [ "$status" -eq 0 ]
   [ -f "$marker" ]
 }
 
-@test "anonymize_vps does not abort the install if anonymize.sh fails" {
-  local stub="${BATS_TEST_TMPDIR}/anonymize.sh"
+@test "anonymize_vps does not abort setup if harden-host.sh fails" {
+  local stub="${BATS_TEST_TMPDIR}/harden-host.sh"
   cat > "$stub" <<'EOF'
 #!/usr/bin/env bash
 echo "boom" >&2
 exit 1
 EOF
   chmod +x "$stub"
-  export ANONYMIZE_SCRIPT="$stub"
+  export HARDEN_HOST_SCRIPT="$stub"
 
   run anonymize_vps
   [ "$status" -eq 0 ]
-  [[ "$output" == *"WARNING: anonymize.sh reported an error"* ]]
+  [[ "$output" == *"WARNING: harden-host.sh reported an error"* ]]
 }
 
-@test "anonymize_vps warns but does not fail if anonymize.sh is missing" {
-  export ANONYMIZE_SCRIPT="${BATS_TEST_TMPDIR}/does-not-exist.sh"
+@test "anonymize_vps warns but does not fail if harden-host.sh is missing" {
+  export HARDEN_HOST_SCRIPT="${BATS_TEST_TMPDIR}/does-not-exist.sh"
 
   run anonymize_vps
   [ "$status" -eq 0 ]
-  [[ "$output" == *"WARNING: anonymize.sh not found"* ]]
+  [[ "$output" == *"WARNING: harden-host.sh not found"* ]]
 }
 
 @test "uninstall_all invokes anonymize.sh --uninstall" {

@@ -1,31 +1,30 @@
 #!/usr/bin/env bash
 # Installs 3x-ui unattended (if not already installed) and creates the
-# VLESS/WS + VLESS/gRPC inbounds via the 3x-ui panel API. Invoked by install.sh.
+# VLESS/WS + VLESS/gRPC + VLESS/XHTTP inbounds via the 3x-ui panel API.
+# Invoked by setup.sh.
 #
-# 3x-ui's own installer (install.sh) is the SOURCE OF TRUTH for panel
+# The upstream 3x-ui installer (install.sh) is the SOURCE OF TRUTH for panel
 # credentials and web base path: when XUI_USERNAME/XUI_PASSWORD/
-# XUI_WEB_BASE_PATH are left unset, install.sh generates secure random
-# values itself and persists them to /etc/x-ui/install-result.env
-# (mode 600). This script deliberately does NOT pass those vars in.
+# XUI_WEB_BASE_PATH are left unset, it generates secure random values and
+# persists them to /etc/x-ui/install-result.env (mode 600). This script
+# deliberately does NOT pass those vars in.
 #
-# The panel PORT is the one exception: install.sh reserves it up front (before
-# installing 3x-ui) so it cannot collide with the WS/gRPC/Subscription/SSH
-# ports it also owns, and hands it here as PANEL_PORT -- which is forwarded
-# to the installer as XUI_PANEL_PORT. This script also forces
-# XUI_SSL_MODE=none, because TLS is terminated by Nginx, not Xray/3x-ui.
+# The panel PORT is the one exception: setup.sh reserves it up front so it
+# cannot collide with the proxy internal ports, then passes it as PANEL_PORT
+# to the upstream installer as XUI_PANEL_PORT. This script forces
+# XUI_SSL_MODE=none because Nginx terminates TLS, not Xray/3x-ui.
 #
-# It then reads the resulting values back out of install-result.env (the
-# panel port there should simply confirm what we asked for) and reports them
-# to install.sh.
+# It reads the resulting values back out of install-result.env and reports
+# them to setup.sh.
 #
-# Required env vars (owned by install.sh -- 3x-ui has no say in these):
+# Required env vars (owned by setup.sh -- 3x-ui has no say in these):
 #   PANEL_PORT                   - pre-reserved panel port (see above)
 #   WS_PORT, WS_PATH             - VLESS/WS inbound
 #   GRPC_PORT, GRPC_SERVICE      - VLESS/gRPC inbound
 #   XHTTP_PORT, XHTTP_PATH        - VLESS/XHTTP inbound (behind Nginx/CDN)
 # Optional:
 #   CLIENT_UUID                  - reuse an existing client UUID (persisted
-#                                  across install.sh reruns); generated if empty
+#                                  across setup.sh reruns); generated if empty
 #   SUB_DOMAIN                  - public domain the subscription is served under
 #                                  (sets 3x-ui's subURI); omitted if unset
 #   VLESS_DOMAIN                 - public domain WS/gRPC inbounds are served
@@ -43,13 +42,13 @@
 #   XUI_USERNAME=<username>
 #   XUI_PASSWORD=<password>
 #   CLIENT_UUID=<uuid>
-# install.sh parses these key=value lines; nothing else should be relied upon.
+# setup.sh parses these key=value lines; nothing else should be relied upon.
 # Human-readable progress goes to stderr.
 #
 # CLI:
 #   --uninstall   Completely remove 3x-ui (service, binary, /etc/x-ui,
 #                 /usr/local/x-ui) and exit. Does not touch Nginx/UFW/certs --
-#                 that's install.sh --uninstall's job. Safe to run
+#                 that's setup.sh --uninstall's job. Safe to run
 #                 even if 3x-ui isn't installed (no-op).
 
 set -euo pipefail
@@ -58,7 +57,7 @@ INSTALL_RESULT_FILE="/etc/x-ui/install-result.env"
 XUI_SERVICE_UNIT="/etc/systemd/system/x-ui.service"
 
 die() {
-  echo "install-3xui.sh ERROR: $*" >&2
+  echo "setup-3x-ui.sh ERROR: $*" >&2
   exit 1
 }
 
@@ -153,16 +152,16 @@ generate_uuid() {
 [[ -n "$CLIENT_SUB_ID" ]] || CLIENT_SUB_ID="$(openssl rand -hex 8)"
 
 install_xui() {
-  echo "3x-ui not found, running unattended installer (3x-ui will generate its own secure username/password/path; port ${PANEL_PORT} is pre-reserved by install.sh)..." >&2
+  echo "3x-ui not found, running unattended installer (3x-ui will generate its own secure username/password/path; port ${PANEL_PORT} is pre-reserved by setup.sh)..." >&2
   if [[ -n "$XUI_VERSION" ]]; then
     echo "Requested XUI_VERSION=${XUI_VERSION}." >&2
   fi
   # Deliberately not passing XUI_USERNAME/XUI_PASSWORD/XUI_WEB_BASE_PATH:
-  # install.sh treats "unset" as "generate a secure random value", which is
-  # what we want. XUI_PANEL_PORT IS passed, since install.sh already reserved
-  # it to avoid colliding with WS/gRPC/Subscription/SSH ports. XUI_VERSION, if
-  # set, is forwarded as install.sh's positional version argument (e.g.
-  # v3.4.0 or dev-latest); unset installs the latest stable release.
+  # the upstream installer treats "unset" as "generate a secure random value",
+  # which is what we want. XUI_PANEL_PORT is passed because setup.sh reserved
+  # it to avoid internal-port collisions. XUI_VERSION, if set, is forwarded as
+  # the upstream install.sh positional version argument (e.g. v3.4.0 or
+  # dev-latest); unset installs the latest stable release.
   XUI_NONINTERACTIVE=1 \
   XUI_PANEL_PORT="$PANEL_PORT" \
   XUI_SSL_MODE="none" \
@@ -183,7 +182,7 @@ read_install_result() {
   : "${XUI_WEB_BASE_PATH:?${INSTALL_RESULT_FILE} did not contain XUI_WEB_BASE_PATH}"
 
   if [[ "$XUI_PANEL_PORT" != "$PANEL_PORT" ]]; then
-    echo "WARNING: 3x-ui reports panel port ${XUI_PANEL_PORT}, but install.sh reserved ${PANEL_PORT}." >&2
+    echo "WARNING: 3x-ui reports panel port ${XUI_PANEL_PORT}, but setup.sh reserved ${PANEL_PORT}." >&2
     echo "This means 3x-ui was already installed/configured before with a different port; using ${XUI_PANEL_PORT} as reported." >&2
   fi
 }
@@ -292,6 +291,8 @@ print(json.dumps({
     'settings': {
         'clients': [{
             'id': os.environ['UUID'],
+            # 3x-ui treats an omitted per-client enable flag as disabled.
+            'enable': True,
             'email': os.environ['EMAIL'],
             'subId': os.environ['SUBID'],
         }],

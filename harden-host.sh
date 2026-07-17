@@ -24,7 +24,7 @@
 # out, closing basic host-discovery/liveness-probing and traceroute hop
 # reveals), normalized TTL so hop-count doesn't visibly change between the
 # WARP-routed and direct-routed outbounds, and stripping the "this is a
-# proxy/panel box" banners (already partially done by install.sh's
+# proxy/panel box" banners (already partially done by setup.sh's
 # `server_tokens off`; this script covers SSH's banner too).
 #
 # CLI:

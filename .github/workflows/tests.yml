@@ -14,17 +14,17 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Shellcheck install.sh
+      - name: ShellCheck scripts
         uses: ludeeus/action-shellcheck@2.0.0
         with:
           scandir: '.'
           ignore_paths: 'tests'
 
       - name: Make scripts executable
-        run: chmod +x install.sh install-3xui.sh anonymize.sh
+        run: chmod +x setup.sh setup-3x-ui.sh harden-host.sh
 
       - name: Bash syntax check
-        run: bash -n install.sh && bash -n install-3xui.sh && bash -n anonymize.sh
+        run: bash -n setup.sh && bash -n setup-3x-ui.sh && bash -n harden-host.sh
 
       - name: Install bats-core
         run: |

@@ -1,13 +1,13 @@
 #!/usr/bin/env bats
 #
-# Unit tests for anonymize.sh.
+# Unit tests for harden-host.sh.
 #
 # Run with:
 #   bats tests/anonymize.bats
 #
 # Stubs out all system-mutating commands (systemctl, sysctl, iptables,
 # timedatectl, apt-get, netfilter-persistent) via tests/stubs/ on PATH, and
-# sources anonymize.sh without executing main() (guarded by the BASH_SOURCE
+# sources harden-host.sh without executing main() (guarded by the BASH_SOURCE
 # check at the bottom of the script). No root privileges or real system
 # changes are required. File-path constants (SYSCTL_CONF, RESOLVED_CONF,
 # SSHD_BANNER_CONF) are plain global vars, so tests override them to
@@ -16,7 +16,7 @@
 
 setup() {
   export PATH="${BATS_TEST_DIRNAME}/stubs:$PATH"
-  export SCRIPT="${BATS_TEST_DIRNAME}/../anonymize.sh"
+  export SCRIPT="${BATS_TEST_DIRNAME}/../harden-host.sh"
 
   # shellcheck disable=SC1090
   source "$SCRIPT"

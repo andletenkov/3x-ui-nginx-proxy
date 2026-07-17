@@ -1,276 +1,211 @@
-# 3x-ui-nginx-proxy
+# 3x-ui-cf-setup
 
-![Tests](https://github.com/andletenkov/3x-ui-nginx-proxy/actions/workflows/tests.yml/badge.svg)
-![License](https://img.shields.io/github/license/andletenkov/3x-ui-nginx-proxy)
+<p align="center">
+  <img src="assets/logo.png" alt="3x-ui-cf-setup" width="192">
+</p>
 
-Interactive setup that installs **3x-ui** (unattended) and puts **Nginx** in
-front of its panel and VLESS/WS + VLESS/gRPC + VLESS/XHTTP **Xray** inbounds, behind
-**Cloudflare**, with a **Let's Encrypt wildcard certificate** (DNS-01) and a
-locked-down **UFW** firewall.
+![Tests](https://github.com/andletenkov/3x-ui-cf-setup/actions/workflows/tests.yml/badge.svg)
+![License](https://img.shields.io/github/license/andletenkov/3x-ui-cf-setup)
 
-Three scripts:
+Automated deployment of a Cloudflare-fronted 3x-ui/Xray server. It installs
+and configures 3x-ui, Nginx, wildcard TLS, UFW, Cloudflare origin protection,
+VLESS transports, subscriptions, routing, and optional host hardening.
 
-| Script | Responsibility |
-|---|---|
-| `install-3xui.sh` | Installs 3x-ui unattended (or reuses an existing install), creates the WS/gRPC inbounds via the panel API. Invoked automatically by `install.sh` — not normally run by hand. |
-| `anonymize.sh` | Hardens the VPS against server-side anonymity/VPN-detection signals (clock sync, DNS resolver, sysctl, two-way ICMP ping block, TTL normalization, banners). Invoked automatically by `install.sh` — can also be run standalone. |
-| `install.sh` | Everything else: Nginx reverse proxy, TLS, UFW, Cloudflare real-IP restoration. Calls `install-3xui.sh` and `anonymize.sh` as part of its flow. |
-
-3x-ui itself is the source of truth for its username/password/web-base-path
-(generated securely by its own installer); `install.sh` only
-pre-reserves the panel **port** up front so it can't collide with the
-WS/gRPC/Subscription ports it also owns.
-
-## Architecture
+## What it sets up
 
 ```mermaid
-flowchart TD
-    Internet["Internet"] --> CF["Cloudflare (DNS + proxy)"]
-    CF -->|"HTTPS :443"| Nginx["Nginx :443 (TLS)"]
+flowchart LR
+    Client --> CF[Cloudflare proxy]
+    CF -->|HTTPS TCP/443| Nginx[Nginx]
 
-    subgraph VPS["VPS"]
-        UFW["UFW: allow 443 · deny 80, PANEL_PORT, WS_PORT, GRPC_PORT"]
-        Nginx
-        Panel["3x-ui panel — 127.0.0.1:PANEL_PORT"]
-        WS["Xray WS inbound — 127.0.0.1:WS_PORT"]
-        GRPC["Xray gRPC inbound — 127.0.0.1:GRPC_PORT"]
-    XHTTP["Xray XHTTP inbound — 127.0.0.1:XHTTP_PORT"]
+    subgraph VPS
+      UFW[UFW: TCP/443 only from Cloudflare IP ranges]
+      Nginx --> Panel[3x-ui panel]
+      Nginx --> WS[VLESS WebSocket]
+      Nginx --> GRPC[VLESS gRPC]
+      Nginx --> XHTTP[VLESS XHTTP]
     end
-
-    Nginx -->|"admin.domain, path PANEL_PATH"| Panel
-    Nginx -->|"vpn.domain, path WS_PATH"| WS
-    Nginx -->|"vpn.domain, service GRPC_SERVICE"| GRPC
-    Nginx -->|"vpn.domain, path XHTTP_PATH"| XHTTP
 ```
 
-Two `server{}` blocks are generated, both on port 443 with the same wildcard
-cert, split by `server_name`:
+| Component | Configuration |
+|---|---|
+| Panel | Private loopback listener, proxied by Nginx on its own subdomain and secret path |
+| VLESS/WS | Loopback Xray listener proxied through Nginx HTTPS |
+| VLESS/gRPC | Loopback Xray listener proxied through Nginx HTTP/2 |
+| VLESS/XHTTP | Loopback Xray listener using `packet-up`, proxied with Nginx `grpc_pass` |
+| Subscription | Loopback listener proxied through the panel hostname |
+| TLS | Let's Encrypt wildcard certificate via Cloudflare DNS-01 |
+| Origin firewall | TCP/443 allowed only from Cloudflare's published IPv4/IPv6 ranges; direct origin HTTPS is denied |
+| Routing | Direct traffic plus WARP routing for configured Russian/OpenAI rules; private and BitTorrent traffic blocked |
 
-| Domain | Purpose | Backend |
-|---|---|---|
-| `<PANEL_SUBDOMAIN>.<BASE_DOMAIN>` | 3x-ui panel | `127.0.0.1:PANEL_PORT` |
-| `<VLESS_SUBDOMAIN>.<BASE_DOMAIN>` | VLESS WebSocket + gRPC + XHTTP | `127.0.0.1:WS_PORT` / `127.0.0.1:GRPC_PORT` / `127.0.0.1:XHTTP_PORT` |
+## Scripts
 
-Everything else returns `404` by default. To serve a fallback page from the VLESS hostname, provide a readable local HTML file when installing. A generic example is included at `examples/fallback.html`:
+| Script | Role |
+|---|---|
+| `setup.sh` | Main entry point. Installs, updates, configures, verifies, and uninstalls the complete stack. |
+| `setup-3x-ui.sh` | Internal helper that installs/reuses 3x-ui and creates WS, gRPC, XHTTP, subscription, and Xray routing configuration. |
+| `harden-host.sh` | Optional host hardening for clock sync, DNS-over-TLS, sysctl, ICMP, TTL, banners, and BBR. Invoked by `setup.sh`. |
 
-```bash
-sudo FALLBACK_HTML_PATH=./examples/fallback.html ./install.sh
-```
-
-The file is copied to `/etc/nginx/3xui-proxy-fallback.html` (mode `0644`) and served only for the VLESS host's `/` route; all other unmatched routes return `404`. Re-run without `FALLBACK_HTML_PATH` to restore `404` everywhere.
-
-### XHTTP through Cloudflare
-
-The generated XHTTP inbound uses `network: xhttp`, `security: none` at the loopback Xray listener, and `xhttpSettings: { path, mode: "packet-up" }`. Nginx terminates TLS and forwards the exact XHTTP path with `grpc_pass` to the loopback port. Keep the VLESS DNS record **proxied** (orange cloud) and enable **Network → gRPC** in the Cloudflare zone. `packet-up` is selected because Xray documents it as the most compatible mode for CDN/reverse-proxy traversal. The generated client URI uses TLS, the same path, and `mode=packet-up`.
+Use `setup.sh` for normal operation. The helper scripts can be run directly only for their respective `--uninstall` actions.
 
 ## Prerequisites
 
-- Debian/Ubuntu VPS, run as root.
-- Domain managed by Cloudflare.
-- Cloudflare API token with `Zone:DNS:Edit` on that zone.
-- Nothing else — 3x-ui is installed for you (unattended) if not already
-  present.
+- Debian or Ubuntu VPS; run as `root`.
+- Domain hosted by Cloudflare.
+- Cloudflare API token with `Zone:DNS:Edit` permission.
+- All public hostnames used by this setup must remain **orange-cloud proxied**. Direct origin access is intentionally blocked by UFW.
 
-## Usage
-
-```bash
-git clone https://github.com/andletenkov/3x-ui-nginx-proxy.git && cd 3x-ui-nginx-proxy
-chmod +x install.sh install-3xui.sh
-sudo ./install.sh
-```
-
-(`install-3xui.sh` must sit next to `install.sh` — it's invoked
-automatically, not downloaded separately.)
-
-You'll be prompted for the base domain, subdomains, email, internal ports
-(WS/gRPC/panel default to random free ports), WS path, gRPC service name,
-and your Cloudflare API token. A summary is shown before anything is changed
-on disk.
-
-During the run, the VPS is anonymized (see [Anonymizing the VPS](#anonymizing-the-vps)
-below), 3x-ui is installed unattended (or reused if already installed), and
-the WS/gRPC inbounds are created automatically via its panel API — no
-manual copy-pasting of inbound JSON. The generated panel username/password
-are printed at the end, along with ready-to-import `vless://` client links.
-The script then optionally runs a live check (internal ports listening +
-public HTTPS reachability).
-
-### Pinning the 3x-ui version
+## Install
 
 ```bash
-sudo XUI_VERSION=v3.4.0 ./install.sh
+git clone https://github.com/andletenkov/3x-ui-cf-setup.git
+cd 3x-ui-cf-setup
+chmod +x setup.sh setup-3x-ui.sh harden-host.sh
+sudo ./setup.sh
 ```
 
-Unset (default) installs the latest stable 3x-ui release. `dev-latest` is
-also accepted (rolling pre-release build). Only used on a fresh 3x-ui
-install — ignored if 3x-ui is already installed on the host.
+The setup asks for the base domain, panel/VLESS subdomains, email, and internal
+ports. It generates unique paths and ports when no saved values exist. 3x-ui
+creates the panel credentials and secret panel path itself; the resulting
+credentials and VLESS links are printed at completion.
 
-### Uninstalling
+New VLESS clients are explicitly enabled by default.
+
+### Optional fallback page
+
+By default, unmatched paths on the VLESS hostname return `404`. To serve a
+single fallback page at `/`, pass a readable HTML file:
 
 ```bash
-sudo ./install.sh --uninstall
+sudo FALLBACK_HTML_PATH=./examples/fallback.html ./setup.sh
 ```
 
-Removes everything both scripts set up: the Nginx site and Cloudflare
-real-IP config, the Certbot deploy hook, the Cloudflare API token file, the
-UFW rules this script added, 3x-ui itself (service, binary, `/etc/x-ui`,
-`/usr/local/x-ui`), and the saved config/state files. Asks for confirmation
-first. Safe to run even if some pieces were never installed.
+The page is copied to `/etc/nginx/3xui-proxy-fallback.html`. Only `/` serves
+the page; unmatched paths still return `404`. Run without `FALLBACK_HTML_PATH`
+to remove the installed fallback page and restore `404` at `/`.
 
-The Let's Encrypt certificate is **kept by default** — Let's Encrypt only
-allows 5 certificate issuances per exact domain set per 7 days, so deleting
-it on every uninstall/reinstall cycle burns that quota fast. Pass
-`--delete-cert` to also remove it:
+### XHTTP through Cloudflare
 
-```bash
-sudo ./install.sh --uninstall --delete-cert
+The generated XHTTP inbound uses:
+
+```json
+{
+  "network": "xhttp",
+  "security": "none",
+  "xhttpSettings": { "path": "/api/vN/...", "mode": "packet-up" }
+}
 ```
 
-`install-3xui.sh --uninstall` can also be run directly to remove just 3x-ui
-(service, binary, `/etc/x-ui`, `/usr/local/x-ui`) without touching
-Nginx/UFW/certs.
+`security: none` applies only to the loopback Nginx-to-Xray hop; Nginx
+terminates public TLS. XHTTP `packet-up` sends session and sequence suffixes
+below its configured path, so Nginx forwards the complete path prefix with
+`grpc_pass`.
 
-`anonymize.sh --uninstall` can also be run directly to revert just the
-anonymization changes (sysctl, DNS resolver, ICMP/TTL iptables rules, SSH
-banner, BBR) without touching Nginx/3x-ui/UFW.
-
-### Updating
-
-```bash
-cd 3x-ui-nginx-proxy
-git pull
-sudo ./install.sh
-```
-
-Re-running `install.sh` is safe and idempotent for infrastructure (Nginx,
-UFW, TLS certs, Cloudflare config). Saved configuration from the previous
-run is loaded automatically — just press Enter through the prompts to keep
-existing values.
-
-**What re-running updates:** Nginx config, UFW rules, Cloudflare real-IP
-ranges, certbot hook, VPS anonymization settings.
-
-**What re-running does NOT change:** existing 3x-ui inbounds, client
-connections, panel credentials, inbound names/remarks. These are created
-once and left untouched to avoid breaking active clients. To modify them,
-use the 3x-ui panel UI directly.
-
-### Anonymizing the VPS
-
-```bash
-sudo ./anonymize.sh              # apply
-sudo ./anonymize.sh --uninstall  # revert
-```
-
-Run automatically as part of `install.sh`, or standalone at any time.
-Hardens the VPS against server-side signals that anonymity/VPN-detection
-checks (e.g. 2ip.io's "privacy bar") key off of:
-
-| Signal | What's done |
-|---|---|
-| Clock skew | Enables NTP time sync (chrony, or `timedatectl set-ntp`) |
-| DNS resolver fingerprint/leak | Points the system resolver at a configurable public resolver set over DNS-over-TLS via `systemd-resolved`, instead of the datacenter's default resolver |
-| ICMP/network-stack fingerprinting | sysctl hardening: ICMP redirects off, source routing off, `rp_filter` on, SYN cookies on |
-| Ping-based liveness/hop probing | **Two-way ICMP echo block** — the box neither answers pings (`INPUT`) nor can originate one (`OUTPUT`), via both `iptables` and `sysctl net.ipv4.icmp_echo_ignore_all` |
-| Hop-count/TTL inconsistency | Normalizes outbound TTL to `64` via an `iptables` mangle rule, so WARP-routed vs direct-routed traffic doesn't show a different hop count |
-| Service-banner fingerprinting | Suppresses the SSH pre-auth banner (nginx's `server_tokens off` is already handled by `install.sh`) |
-
-Also enables **BBR congestion control** (`net.ipv4.tcp_congestion_control=bbr`
-+ `net.core.default_qdisc=fq`) for better throughput on loss/high-latency
-routes. Skipped gracefully if the kernel doesn't support the `tcp_bbr`
-module.
-
-Resolver defaults:
-- `DNS_RESOLVERS='1.1.1.1#cloudflare-dns.com 1.0.0.1#cloudflare-dns.com'`
-- `DNS_OVER_TLS_MODE='yes'`
-- `DNSSEC_MODE='yes'`
-
-Example override:
-
-```bash
-sudo DNS_RESOLVERS='9.9.9.9#dns.quad9.net 149.112.112.112#dns.quad9.net' \
-     DNS_OVER_TLS_MODE=yes \
-     DNSSEC_MODE=yes \
-     ./anonymize.sh
-```
-
-**Not fixable from inside the VPS:** IP/ASN reputation (hosting-provider IP
-ranges are flagged by IP-intelligence databases regardless of in-VM config),
-reverse DNS/PTR records (set at the hosting provider, not the VM), and
-WebRTC leaks (client-side, browser only).
-
-### WARP outbound and routing
-
-The install script automatically:
-
-1. **Registers a Cloudflare WARP account** via the 3x-ui panel API
-   (`/panel/api/xray/warp/del` → `/panel/api/xray/warp/reg`) — any
-   pre-existing WARP data is purged first so credentials are always fresh.
-2. **Builds a WireGuard outbound** (`tag: warp`) from the registration
-   response and injects it into the xray config alongside `direct` and
-   `blocked` outbounds.
-3. **Configures routing rules**:
-   - `geoip:ru` → warp
-   - `geosite:category-ru` + `regexp:.*\.ru$` + `geosite:openai` → warp
-   - `geoip:private` → blocked
-   - `bittorrent` → blocked
-4. **Tests the WARP outbound** via `/panel/api/xray/testOutbound` and
-   reports the result (delay, egress country, warp status).
-
-Geo files (`geoip.dat`, `geosite.dat`) are downloaded from
-[runetfreedom/russia-v2ray-rules-dat](https://github.com/runetfreedom/russia-v2ray-rules-dat)
-on fresh installs, which includes `category-ru` and other Russia-specific
-blocking/routing categories.
+In Cloudflare, enable **Network → gRPC** for the zone. Keep the VLESS hostname
+orange-cloud proxied. Import the XHTTP URI generated by the panel or setup
+output; it must use the same path and `mode=packet-up`.
 
 ## Configuration reference
 
-| Variable | Default | Notes |
+| Variable | Default / source | Notes |
 |---|---|---|
-| `BASE_DOMAIN` | — | Required, prompted |
-| `PANEL_SUBDOMAIN` | `admin` | Prompted. Must differ from `VLESS_SUBDOMAIN` |
-| `VLESS_SUBDOMAIN` | `vpn` | Prompted. Must differ from `PANEL_SUBDOMAIN` |
-| `EMAIL` | — | Prompted. Let's Encrypt contact |
-| `SUB_PORT` | `2096` | Prompted. Internal subscription port |
-| `WS_PORT` | random | Prompted (defaults to a random free port). Internal Xray WS port |
-| `GRPC_PORT` | random | Prompted (defaults to a random free port). Internal Xray gRPC port |
-| `WS_PATH` | `/api/v1/events` | Prompted. Letters/numbers/`/`/`_`/`-` only |
-| `GRPC_SERVICE` | `api.v1.SyncService` | Prompted. `[A-Za-z0-9._-]+` |
-| `SUB_PATH` | `/sub` | Prompted |
-| `CLOUDFLARE_API_TOKEN` | — | Prompted (hidden) unless already exported |
-| `XUI_VERSION` | latest stable | Env var only (not prompted). 3x-ui release tag, e.g. `v3.4.0`, or `dev-latest`. Ignored if 3x-ui is already installed |
-| `PANEL_PORT` | random | **Not prompted.** Reserved by `install.sh` itself (excluded from `443`/`SUB_PORT`/`WS_PORT`/`GRPC_PORT`) and handed to the 3x-ui installer as `XUI_PANEL_PORT` |
-| `PANEL_PATH` | random | **Not prompted.** Generated securely by the 3x-ui installer itself (`XUI_WEB_BASE_PATH`) |
-| 3x-ui username/password | random | **Not prompted or settable here.** Generated securely by the 3x-ui installer, printed at the end of the run |
+| `BASE_DOMAIN` | prompted | Required base domain |
+| `PANEL_SUBDOMAIN` | `admin` | Must differ from `VLESS_SUBDOMAIN` |
+| `VLESS_SUBDOMAIN` | `vpn` | Cloudflare-proxied VLESS hostname |
+| `EMAIL` | prompted | Let's Encrypt contact address |
+| `SUB_PORT`, `WS_PORT`, `GRPC_PORT`, `XHTTP_PORT` | random free port | Internal loopback ports; all must differ and cannot be `443` |
+| `WS_PATH`, `GRPC_SERVICE`, `XHTTP_PATH`, `SUB_PATH` | generated once | Saved and reused on subsequent runs; XHTTP uses an `/api/vN/...` path |
+| `CLOUDFLARE_API_TOKEN` | prompted, hidden | Required unless exported in the environment |
+| `FALLBACK_HTML_PATH` | unset | Optional readable single-file HTML fallback served only at `/` on the VLESS host |
+| `XUI_VERSION` | latest stable | Optional environment variable for a fresh 3x-ui installation, for example `v3.4.0` |
+| `PANEL_PORT` | random free port | Reserved by `setup.sh` before installing 3x-ui |
+| `PANEL_PATH`, panel username/password | generated by 3x-ui | Printed at completion and stored by the upstream installer |
+| `DNS_RESOLVERS`, `DNS_OVER_TLS_MODE`, `DNSSEC_MODE` | Cloudflare DoT defaults | Optional `harden-host.sh` overrides |
 
-`PANEL_PORT`/`SUB_PORT`/`WS_PORT`/`GRPC_PORT` must all differ from each
-other and from `443`. `PANEL_PORT` itself is only known after 3x-ui
-installs (see [Usage](#usage)) — `install.sh` re-validates it
-doesn't collide with any of the above once reported back.
+## Update safely
+
+```bash
+cd 3x-ui-cf-setup
+git pull
+sudo ./setup.sh
+```
+
+Saved settings are loaded automatically. Re-running updates Nginx, UFW,
+Cloudflare IP ranges, certificates/hooks, host-hardening settings, and missing
+inbounds. Existing inbounds and clients are not recreated or changed, so active
+client connections are preserved.
+
+Cloudflare origin ranges are refreshed every time `setup.sh` runs. Cloudflare
+does not publish a guaranteed change cadence; run updates periodically to
+refresh the firewall rules.
+
+### Pin the 3x-ui version
+
+```bash
+sudo XUI_VERSION=v3.4.0 ./setup.sh
+```
+
+Without `XUI_VERSION`, a fresh 3x-ui installation uses the latest stable
+upstream release. It is ignored when 3x-ui already exists.
+
+## Uninstall
+
+```bash
+sudo ./setup.sh --uninstall
+```
+
+This removes the Nginx site, Cloudflare real-IP configuration, Cloudflare-only
+UFW rules, Certbot hook, Cloudflare token, saved state, 3x-ui, and host
+hardening. The wildcard certificate is retained by default to avoid Let's
+Encrypt issuance limits.
+
+```bash
+sudo ./setup.sh --uninstall --delete-cert
+```
+
+Use the extra flag only when the certificate should also be removed.
+
+## Host hardening
+
+`setup.sh` runs host hardening as a best-effort step. To apply or revert it
+separately:
+
+```bash
+sudo ./harden-host.sh
+sudo ./harden-host.sh --uninstall
+```
+
+Environment overrides:
+
+```bash
+sudo DNS_RESOLVERS='9.9.9.9#dns.quad9.net 149.112.112.112#dns.quad9.net' \
+  DNS_OVER_TLS_MODE=yes DNSSEC_MODE=yes ./harden-host.sh
+```
+
+## Security model and limitations
+
+- Normal Cloudflare proxying does not support direct QUIC/Hysteria2 or REALITY
+  to the origin. Do not add DNS-only records for this VPS if hiding the origin
+  IP is a goal.
+- Cloudflare's proxy hides the origin from normal DNS users; the UFW rules also
+  reject direct TCP/443 traffic from non-Cloudflare sources.
+- The Cloudflare API token and generated state files use mode `600`.
+- SSH is never modified by `setup.sh`; ensure your own SSH UFW access exists
+  before enabling UFW on a new host.
 
 ## Generated files
 
 | Path | Purpose |
 |---|---|
-| `/etc/letsencrypt/cloudflare.ini` | Cloudflare API token (`chmod 600`) |
-| `/etc/letsencrypt/live/<domain>/` | Wildcard cert + key |
-| `/etc/letsencrypt/renewal-hooks/deploy/nginx-reload.sh` | Reloads Nginx on renewal |
-| `/etc/nginx/conf.d/cloudflare-real-ip.conf` | Trusted Cloudflare IP ranges |
-| `/etc/nginx/sites-available/3xui-proxy` | Panel + VLESS server blocks |
-| `/etc/nginx/sites-enabled/3xui-proxy` | Symlink (default site removed) |
+| `/etc/nginx/.3xui-proxy.conf` | Saved setup values and client identifiers |
+| `/etc/nginx/.3xui-proxy-ports.state` | Ports owned by the setup |
+| `/etc/nginx/.3xui-proxy-cloudflare-ips.state` | Cloudflare ranges used for UFW rules |
+| `/etc/nginx/conf.d/cloudflare-real-ip.conf` | Cloudflare real-IP trust configuration |
+| `/etc/nginx/sites-available/3xui-proxy` | Generated Nginx virtual hosts |
+| `/etc/letsencrypt/cloudflare.ini` | Cloudflare DNS API token, mode `600` |
+| `/etc/x-ui/install-result.env` | 3x-ui generated panel credentials, mode `600` |
 
-Existing files are backed up as `<path>.backup-<timestamp>` before being
-overwritten.
-
-## Safety
-
-- Every config write is atomic (temp file → `mv`), with automatic rollback
-  if `nginx -t` fails.
-- All internal ports are explicitly denied in UFW, so a service accidentally
-  bound to `0.0.0.0` is still not reachable from the internet.
-- Re-running the script is safe: certs aren't force-reissued, configs are
-  backed up, and stale UFW rules from previous runs are cleaned up.
-
-## Testing
+## Test
 
 ```bash
 brew install bats-core   # or: apt install bats
@@ -278,24 +213,4 @@ chmod +x tests/stubs/*
 bats tests/install.bats tests/anonymize.bats
 ```
 
-See [`tests/README.md`](tests/README.md) for coverage details. CI
-([`.github/workflows/tests.yml`](.github/workflows/tests.yml)) runs
-shellcheck + these tests on every push/PR to `main`.
-
-## Troubleshooting
-
-| Symptom | Check |
-|---|---|
-| `nginx -t` fails after setup | Look for a `.backup-<timestamp>` file next to the reverted config |
-| Panel returns 502 | `ss -lntp \| grep PANEL_PORT` — is 3x-ui actually listening there? |
-| VLESS client can't connect | Confirm Xray is bound to `127.0.0.1` on the exact `WS_PORT`/`GRPC_PORT`, with matching `WS_PATH`/`GRPC_SERVICE` |
-| Certificate issuance fails | Check the Cloudflare token's permissions and `/var/log/letsencrypt/letsencrypt.log` |
-
-Useful commands (also printed at the end of every run):
-
-```bash
-nginx -t
-ufw status verbose
-certbot renew --dry-run
-ss -lntp | egrep ':443|:<PANEL_PORT>|:<WS_PORT>|:<GRPC_PORT>'
-```
+CI runs ShellCheck and the Bats suite on pushes and pull requests.
