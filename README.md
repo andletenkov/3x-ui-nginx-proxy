@@ -114,6 +114,27 @@ Nginx/UFW/certs.
 anonymization changes (sysctl, DNS resolver, ICMP/TTL iptables rules, SSH
 banner, BBR) without touching Nginx/3x-ui/UFW.
 
+### Updating
+
+```bash
+cd 3x-ui-nginx-proxy
+git pull
+sudo ./install.sh
+```
+
+Re-running `install.sh` is safe and idempotent for infrastructure (Nginx,
+UFW, TLS certs, Cloudflare config). Saved configuration from the previous
+run is loaded automatically — just press Enter through the prompts to keep
+existing values.
+
+**What re-running updates:** Nginx config, UFW rules, Cloudflare real-IP
+ranges, certbot hook, VPS anonymization settings.
+
+**What re-running does NOT change:** existing 3x-ui inbounds, client
+connections, panel credentials, inbound names/remarks. These are created
+once and left untouched to avoid breaking active clients. To modify them,
+use the 3x-ui panel UI directly.
+
 ### Anonymizing the VPS
 
 ```bash
