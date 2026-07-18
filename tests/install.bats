@@ -144,6 +144,18 @@ valid_inputs() {
   [ "$status" -eq 0 ]
 }
 
+@test "confirm_configuration includes XHTTP and its firewall rule" {
+  valid_inputs
+
+  run confirm_configuration <<< "y"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"VLESS XHTTP:"* ]]
+  [[ "$output" == *"network: xhttp (packet-up)"* ]]
+  [[ "$output" == *"internal Xray port: ${XHTTP_PORT}"* ]]
+  [[ "$output" == *"path: ${XHTTP_PATH}"* ]]
+  [[ "$output" == *"${XHTTP_PORT}/tcp"* ]]
+}
+
 @test "validate_inputs rejects invalid base domain" {
   valid_inputs
   BASE_DOMAIN="not_a_domain"
@@ -324,6 +336,36 @@ valid_inputs() {
     port="$(random_free_port)"
     [ "$port" != "50000" ]
   done
+}
+
+# ---------------------------------------------------------------------------
+# save_config
+# ---------------------------------------------------------------------------
+
+@test "save_config creates its missing parent directory" {
+  CONFIG_FILE="${BATS_TEST_TMPDIR}/missing-nginx/.3xui-proxy.conf"
+  TIMESTAMP="20260101-000000"
+  BASE_DOMAIN="example.com"
+  PANEL_SUBDOMAIN="admin"
+  VLESS_SUBDOMAIN="vpn"
+  PANEL_PATH="/my-admin"
+  EMAIL="admin@example.com"
+  PANEL_PORT="2053"
+  SUB_PORT="2096"
+  WS_PORT="10001"
+  GRPC_PORT="10002"
+  XHTTP_PORT="10003"
+  WS_PATH="/api/v1/events"
+  GRPC_SERVICE="api.v1.SyncService"
+  XHTTP_PATH="/api/v1/ingest/abcd1234"
+  SUB_PATH="/sub"
+  CLIENT_UUID="00000000-0000-4000-8000-000000000001"
+  CLIENT_SUB_ID="client-sub-id"
+
+  run save_config
+  [ "$status" -eq 0 ]
+  [ -f "$CONFIG_FILE" ]
+  [[ "$(<"$CONFIG_FILE")" == *'BASE_DOMAIN="example.com"'* ]]
 }
 
 # ---------------------------------------------------------------------------
@@ -741,6 +783,36 @@ EOF
   run install_3xui_and_inbounds
   [ "$status" -eq 0 ]
   [ "$(cat "$received_log")" == "51234" ]
+}
+
+@test "install_3xui_and_inbounds forwards generated inbound remarks to the panel helper" {
+  CONFIG_FILE="${BATS_TEST_TMPDIR}/xui-proxy.conf"
+  PANEL_PORT="51234"
+  WS_PORT="51235"
+  WS_PATH="/api/v1/events"
+  GRPC_PORT="51236"
+  GRPC_SERVICE="api.v1.SyncService"
+  XHTTP_PORT="51237"
+  XHTTP_PATH="/api/v1/ingest"
+  SUB_PORT="2096"
+  SUB_PATH="/sub"
+  CLIENT_UUID=""
+  BASE_DOMAIN="example.com"
+  PANEL_SUBDOMAIN="admin"
+  VLESS_SUBDOMAIN="vpn"
+  EMAIL="user@example.com"
+  INBOUND_REMARK_WS="🇪🇪 WebSocket-CDN"
+  INBOUND_REMARK_GRPC="🇪🇪 gRPC-CDN"
+  INBOUND_REMARK_XHTTP="🇪🇪 XHTTP-CDN"
+
+  local stub="${BATS_TEST_TMPDIR}/install-3xui.sh"
+  local received_log="${BATS_TEST_TMPDIR}/received-remarks"
+  write_installer_stub "$stub" "printf '%s\\n%s\\n%s\\n' \"\${INBOUND_REMARK_WS}\" \"\${INBOUND_REMARK_GRPC}\" \"\${INBOUND_REMARK_XHTTP}\" > '${received_log}'"
+  export INSTALL_3XUI_SCRIPT="$stub"
+
+  run install_3xui_and_inbounds
+  [ "$status" -eq 0 ]
+  [ "$(cat "$received_log")" == $'🇪🇪 WebSocket-CDN\n🇪🇪 gRPC-CDN\n🇪🇪 XHTTP-CDN' ]
 }
 
 @test "install_3xui_and_inbounds dies if PANEL_PORT ends up colliding (validate_panel_port re-check)" {
