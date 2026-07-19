@@ -912,15 +912,19 @@ EOF
 configure_ufw() {
   echo "[7/8] Configuring UFW..."
 
-  ((${#CF_IP_RANGES[@]} > 0)) ||
-    die "Cloudflare IP ranges are unavailable; refusing to expose TCP 443 to the public internet."
-
+  # 443/tcp is intentionally open to the whole internet, not just Cloudflare:
+  # direct-connection inbounds (VLESS+Reality, NaiveProxy) share port 443 with
+  # the Cloudflare-fronted CDN inbounds via Nginx's SNI-based routing, so
+  # restricting 443 to Cloudflare's ranges would block those direct clients.
+  # Clean up any per-range Cloudflare-only allow rules left over from a
+  # previous run of this script (pre-direct-connection-inbound versions).
   local old_cf_range
   if [[ -f "$CF_IP_STATE_FILE" ]]; then
     while IFS= read -r old_cf_range; do
       [[ -n "$old_cf_range" ]] || continue
       ufw delete allow from "$old_cf_range" to any port 443 proto tcp || true
     done < "$CF_IP_STATE_FILE"
+    rm -f "$CF_IP_STATE_FILE"
   fi
 
   local prev_panel_port=""
@@ -957,18 +961,10 @@ configure_ufw() {
   # deleting the wrong one on --uninstall) for something entirely unrelated
   # to this script's job. If SSH isn't already reachable through UFW on this
   # host, allow it yourself, e.g.: ufw allow 22/tcp
-  # Remove broad rules before rebuilding the Cloudflare allow-list. UFW uses
-  # first-match ordering, so a stale broad deny placed before these allows
-  # would block Cloudflare as well.
+  # Remove any stale rules before adding the current one (idempotent reruns).
   ufw delete allow 443/tcp || true
   ufw delete deny 443/tcp || true
-
-  # Add Cloudflare rules first, then append the catch-all deny after them.
-  local cf_range
-  for cf_range in "${CF_IP_RANGES[@]}"; do
-    ufw allow from "$cf_range" to any port 443 proto tcp
-  done
-  ufw deny 443/tcp || true
+  ufw allow 443/tcp
 
   ufw deny 80/tcp || true
   ufw deny "${PANEL_PORT}/tcp" || true
@@ -988,9 +984,6 @@ STATE_GRPC_PORT=${GRPC_PORT}
 STATE_XHTTP_PORT=${XHTTP_PORT}
 EOF
   chmod 600 "$STATE_FILE"
-
-  printf '%s\n' "${CF_IP_RANGES[@]}" > "$CF_IP_STATE_FILE"
-  chmod 600 "$CF_IP_STATE_FILE"
 }
 
 print_summary() {
@@ -1295,7 +1288,9 @@ uninstall_all() {
   if command -v ufw >/dev/null 2>&1; then
     # SSH is never touched -- this script never added an SSH rule, so it
     # never removes one either (see configure_ufw).
-    # Remove both the legacy broad rule and the Cloudflare-only rules we own.
+    # Remove the 443 allow rule this script owns, plus any leftover
+    # per-range Cloudflare-only allow rules from installs predating direct-
+    # connection inbounds (VLESS+Reality, NaiveProxy).
     ufw delete allow 443/tcp >/dev/null 2>&1 || true
     if [[ -f "$CF_IP_STATE_FILE" ]]; then
       while IFS= read -r cf_range; do

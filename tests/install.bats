@@ -466,29 +466,34 @@ nginx_config_env() {
   grep -q "client_max_body_size 0;" "$NGINX_SITE"
 }
 
-@test "configure_ufw allows TCP 443 only from current Cloudflare ranges" {
+@test "configure_ufw allows TCP 443 from anywhere (shared by CDN and direct-connection inbounds)" {
   nginx_config_env
   STATE_FILE="${BATS_TEST_TMPDIR}/ports.state"
   CF_IP_STATE_FILE="${BATS_TEST_TMPDIR}/cloudflare-ips.state"
-  CF_IP_RANGES=("173.245.48.0/20" "2400:cb00::/32")
   export UFW_LOG="${BATS_TEST_TMPDIR}/ufw.log"
   : > "$UFW_LOG"
 
   configure_ufw
 
-  grep -q "allow from 173.245.48.0/20 to any port 443 proto tcp" "$UFW_LOG"
-  grep -q "allow from 2400:cb00::/32 to any port 443 proto tcp" "$UFW_LOG"
   grep -q "delete allow 443/tcp" "$UFW_LOG"
   grep -q "delete deny 443/tcp" "$UFW_LOG"
-  grep -q "deny 443/tcp" "$UFW_LOG"
-  local delete_deny_line allow_cf_line final_deny_line
-  delete_deny_line="$(grep -n "delete deny 443/tcp" "$UFW_LOG" | head -1 | cut -d: -f1)"
-  allow_cf_line="$(grep -n "allow from 173.245.48.0/20" "$UFW_LOG" | head -1 | cut -d: -f1)"
-  final_deny_line="$(grep -n '^deny 443/tcp$' "$UFW_LOG" | tail -1 | cut -d: -f1)"
-  [ "$delete_deny_line" -lt "$allow_cf_line" ]
-  [ "$allow_cf_line" -lt "$final_deny_line" ]
-  grep -qx "173.245.48.0/20" "$CF_IP_STATE_FILE"
-  grep -qx "2400:cb00::/32" "$CF_IP_STATE_FILE"
+  grep -qx "ufw allow 443/tcp" "$UFW_LOG"
+  ! grep -q "allow from .* to any port 443 proto tcp" "$UFW_LOG"
+}
+
+@test "configure_ufw cleans up and removes stale per-range Cloudflare allow rules from older installs" {
+  nginx_config_env
+  STATE_FILE="${BATS_TEST_TMPDIR}/ports.state"
+  CF_IP_STATE_FILE="${BATS_TEST_TMPDIR}/cloudflare-ips.state"
+  printf '%s\n%s\n' "173.245.48.0/20" "2400:cb00::/32" > "$CF_IP_STATE_FILE"
+  export UFW_LOG="${BATS_TEST_TMPDIR}/ufw.log"
+  : > "$UFW_LOG"
+
+  configure_ufw
+
+  grep -q "delete allow from 173.245.48.0/20 to any port 443 proto tcp" "$UFW_LOG"
+  grep -q "delete allow from 2400:cb00::/32 to any port 443 proto tcp" "$UFW_LOG"
+  [ ! -f "$CF_IP_STATE_FILE" ]
 }
 
 @test "write_nginx_config's panel proxy_pass has no trailing slash (preserves base path prefix)" {
