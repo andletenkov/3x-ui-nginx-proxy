@@ -806,6 +806,99 @@ EOF
   [ "$(cat "$received_log")" == "51234" ]
 }
 
+# ---------------------------------------------------------------------------
+# install_nginx_org_repo
+# ---------------------------------------------------------------------------
+
+write_os_release() {
+  # $1: dest path, $2: ID, $3: VERSION_CODENAME
+  cat > "$1" <<EOF
+ID=${2}
+VERSION_CODENAME=${3}
+EOF
+}
+
+@test "install_nginx_org_repo writes the expected apt source and pin for Ubuntu" {
+  OS_RELEASE_FILE="${BATS_TEST_TMPDIR}/os-release"
+  write_os_release "$OS_RELEASE_FILE" "ubuntu" "noble"
+  NGINX_ORG_LIST="${BATS_TEST_TMPDIR}/nginx.list"
+  NGINX_ORG_KEYRING="${BATS_TEST_TMPDIR}/nginx-archive-keyring.gpg"
+  NGINX_ORG_PREF="${BATS_TEST_TMPDIR}/99nginx"
+
+  run install_nginx_org_repo
+  [ "$status" -eq 0 ]
+
+  grep -qF "deb [signed-by=${NGINX_ORG_KEYRING}] http://nginx.org/packages/ubuntu noble nginx" "$NGINX_ORG_LIST"
+  [ -f "$NGINX_ORG_KEYRING" ]
+  grep -qF "Pin-Priority: 900" "$NGINX_ORG_PREF"
+}
+
+@test "install_nginx_org_repo writes the expected apt source for Debian" {
+  OS_RELEASE_FILE="${BATS_TEST_TMPDIR}/os-release"
+  write_os_release "$OS_RELEASE_FILE" "debian" "bookworm"
+  NGINX_ORG_LIST="${BATS_TEST_TMPDIR}/nginx.list"
+  NGINX_ORG_KEYRING="${BATS_TEST_TMPDIR}/nginx-archive-keyring.gpg"
+  NGINX_ORG_PREF="${BATS_TEST_TMPDIR}/99nginx"
+
+  run install_nginx_org_repo
+  [ "$status" -eq 0 ]
+
+  grep -qF "deb [signed-by=${NGINX_ORG_KEYRING}] http://nginx.org/packages/debian bookworm nginx" "$NGINX_ORG_LIST"
+}
+
+@test "install_nginx_org_repo is idempotent when the repo is already configured" {
+  OS_RELEASE_FILE="${BATS_TEST_TMPDIR}/os-release"
+  write_os_release "$OS_RELEASE_FILE" "ubuntu" "noble"
+  NGINX_ORG_LIST="${BATS_TEST_TMPDIR}/nginx.list"
+  NGINX_ORG_KEYRING="${BATS_TEST_TMPDIR}/nginx-archive-keyring.gpg"
+  NGINX_ORG_PREF="${BATS_TEST_TMPDIR}/99nginx"
+
+  install_nginx_org_repo
+  local first_content
+  first_content="$(cat "$NGINX_ORG_LIST")"
+
+  run install_nginx_org_repo
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"already configured, skipping"* ]]
+  [ "$(cat "$NGINX_ORG_LIST")" = "$first_content" ]
+}
+
+@test "install_nginx_org_repo dies on an unsupported distro" {
+  OS_RELEASE_FILE="${BATS_TEST_TMPDIR}/os-release"
+  write_os_release "$OS_RELEASE_FILE" "fedora" "39"
+  NGINX_ORG_LIST="${BATS_TEST_TMPDIR}/nginx.list"
+  NGINX_ORG_KEYRING="${BATS_TEST_TMPDIR}/nginx-archive-keyring.gpg"
+  NGINX_ORG_PREF="${BATS_TEST_TMPDIR}/99nginx"
+
+  run install_nginx_org_repo
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"unsupported distro"* ]]
+}
+
+@test "install_nginx_org_repo dies when the codename is missing" {
+  OS_RELEASE_FILE="${BATS_TEST_TMPDIR}/os-release"
+  printf 'ID=ubuntu\n' > "$OS_RELEASE_FILE"
+  NGINX_ORG_LIST="${BATS_TEST_TMPDIR}/nginx.list"
+  NGINX_ORG_KEYRING="${BATS_TEST_TMPDIR}/nginx-archive-keyring.gpg"
+  NGINX_ORG_PREF="${BATS_TEST_TMPDIR}/99nginx"
+
+  run install_nginx_org_repo
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"could not determine distro codename"* ]]
+}
+
+@test "install_packages calls install_nginx_org_repo before installing nginx" {
+  OS_RELEASE_FILE="${BATS_TEST_TMPDIR}/os-release"
+  write_os_release "$OS_RELEASE_FILE" "ubuntu" "noble"
+  NGINX_ORG_LIST="${BATS_TEST_TMPDIR}/nginx.list"
+  NGINX_ORG_KEYRING="${BATS_TEST_TMPDIR}/nginx-archive-keyring.gpg"
+  NGINX_ORG_PREF="${BATS_TEST_TMPDIR}/99nginx"
+
+  run install_packages
+  [ "$status" -eq 0 ]
+  [ -f "$NGINX_ORG_LIST" ]
+}
+
 @test "install_3xui_and_inbounds forwards generated inbound remarks to the panel helper" {
   CONFIG_FILE="${BATS_TEST_TMPDIR}/xui-proxy.conf"
   PANEL_PORT="51234"

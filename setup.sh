@@ -487,6 +487,57 @@ confirm_configuration() {
   esac
 }
 
+NGINX_ORG_KEYRING="/usr/share/keyrings/nginx-archive-keyring.gpg"
+NGINX_ORG_LIST="/etc/apt/sources.list.d/nginx.list"
+NGINX_ORG_PREF="/etc/apt/preferences.d/99nginx"
+OS_RELEASE_FILE="${OS_RELEASE_FILE:-/etc/os-release}"
+
+# Installs nginx from nginx.org's official apt repo instead of the distro's
+# bundled package. Needed because Debian/Ubuntu's own `nginx` package does
+# not reliably ship --with-stream and --with-stream_ssl_preread_module,
+# which the SNI Guard (stream {} block routing NaiveProxy/Reality/CDN
+# traffic by SNI on shared port 443) depends on.
+install_nginx_org_repo() {
+  local distro_id distro_codename expected_line
+
+  [[ -f "$OS_RELEASE_FILE" ]] ||
+    die "install_nginx_org_repo: ${OS_RELEASE_FILE} not found; cannot determine distro."
+
+  # shellcheck disable=SC1090
+  distro_id="$(. "$OS_RELEASE_FILE" && echo "${ID:-}")"
+  # shellcheck disable=SC1090
+  distro_codename="$(. "$OS_RELEASE_FILE" && echo "${VERSION_CODENAME:-}")"
+
+  [[ "$distro_id" == "ubuntu" || "$distro_id" == "debian" ]] ||
+    die "install_nginx_org_repo: unsupported distro '${distro_id:-unknown}' (expected debian or ubuntu)."
+  [[ -n "$distro_codename" ]] ||
+    die "install_nginx_org_repo: could not determine distro codename from ${OS_RELEASE_FILE}."
+
+  expected_line="deb [signed-by=${NGINX_ORG_KEYRING}] http://nginx.org/packages/${distro_id} ${distro_codename} nginx"
+
+  if [[ -f "$NGINX_ORG_LIST" ]] && grep -qxF "$expected_line" "$NGINX_ORG_LIST"; then
+    echo "nginx.org apt repo already configured, skipping." >&2
+    return
+  fi
+
+  apt install -y curl gnupg2 ca-certificates
+
+  install -d -m 755 "$(dirname -- "$NGINX_ORG_KEYRING")"
+  curl -fsSL https://nginx.org/keys/nginx_signing.key | gpg --dearmor | tee "$NGINX_ORG_KEYRING" >/dev/null
+
+  echo "$expected_line" > "$NGINX_ORG_LIST"
+
+  install -d -m 755 "$(dirname -- "$NGINX_ORG_PREF")"
+  cat > "$NGINX_ORG_PREF" <<'EOF'
+Package: *
+Pin: origin nginx.org
+Pin: release o=nginx
+Pin-Priority: 900
+EOF
+
+  apt update
+}
+
 install_packages() {
   echo "[1/8] Installing packages..."
 
@@ -494,6 +545,10 @@ install_packages() {
     # shellcheck disable=SC2016
     echo '$nrconf{restart} = '\''a'\'';' > /etc/needrestart/conf.d/50-autorestart.conf
   fi
+
+  apt update
+
+  install_nginx_org_repo
 
   apt update
 

@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# Stub for `gpg`. Just passes stdin through to stdout so `gpg --dearmor`
+# doesn't need real key material in tests -- install_nginx_org_repo only
+# cares that curl's output was piped through *something* and written to a
+# file, not that it's a real binary keyring.
+set -eu
+cat
