@@ -19,7 +19,8 @@ setup() {
 
   # Reset any state that individual tests might rely on being clean.
   unset SS_LISTENING_PORTS CURL_SHOULD_FAIL CURL_CF_IPV4 CURL_CF_IPV6 \
-    CURL_HTTP_CODE NGINX_T_SHOULD_FAIL UFW_LOG VPS_COUNTRY_CODE
+    CURL_HTTP_CODE NGINX_T_SHOULD_FAIL UFW_LOG VPS_COUNTRY_CODE \
+    SYSTEMCTL_LOG SYSTEMCTL_SHOULD_FAIL NAIVE_RELEASE_JSON TAR_SHOULD_FAIL
 }
 
 # ---------------------------------------------------------------------------
@@ -1746,6 +1747,159 @@ naive_env() {
   [ ! -e "$NAIVE_BIN" ]
 }
 
+# ---------------------------------------------------------------------------
+# prepare_naive_docroot / write_caddyfile / write_naive_systemd_unit
+# ---------------------------------------------------------------------------
+
+caddy_env() {
+  NAIVE_SUBDOMAIN="naive"
+  NAIVE_PORT="21000"
+  NAIVE_USERNAME="user_abcd1234"
+  NAIVE_PASSWORD="supersecretpassword"
+  BASE_DOMAIN="example.com"
+  CERT_DIR="/tmp/fake-cert"
+  CADDYFILE="${BATS_TEST_TMPDIR}/Caddyfile"
+  NAIVE_DOCROOT="${BATS_TEST_TMPDIR}/naive-docroot"
+  NAIVE_BIN="${BATS_TEST_TMPDIR}/caddy-not-installed"
+  NAIVE_SYSTEMD_UNIT="${BATS_TEST_TMPDIR}/caddy.service"
+  FALLBACK_HTML_PATH=""
+}
+
+@test "prepare_naive_docroot reuses FALLBACK_HTML_PATH content when set" {
+  caddy_env
+  local source_html="${BATS_TEST_TMPDIR}/source.html"
+  printf '<h1>Fallback</h1>\n' > "$source_html"
+  FALLBACK_HTML_PATH="$source_html"
+
+  run prepare_naive_docroot
+  [ "$status" -eq 0 ]
+  [ "$(cat "${NAIVE_DOCROOT}/index.html")" = "<h1>Fallback</h1>" ]
+}
+
+@test "prepare_naive_docroot writes a generic default page when FALLBACK_HTML_PATH is unset" {
+  caddy_env
+
+  run prepare_naive_docroot
+  [ "$status" -eq 0 ]
+  grep -q "It works!" "${NAIVE_DOCROOT}/index.html"
+}
+
+@test "prepare_naive_docroot rejects a missing FALLBACK_HTML_PATH" {
+  caddy_env
+  FALLBACK_HTML_PATH="${BATS_TEST_TMPDIR}/missing.html"
+
+  run prepare_naive_docroot
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"FALLBACK_HTML_PATH must point to a readable regular file"* ]]
+}
+
+@test "write_caddyfile skips entirely when NAIVE_SUBDOMAIN is unset" {
+  caddy_env
+  NAIVE_SUBDOMAIN=""
+
+  run write_caddyfile
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"NAIVE_SUBDOMAIN not set, skipping Caddyfile"* ]]
+  [ ! -e "$CADDYFILE" ]
+}
+
+@test "write_caddyfile generates the expected site block" {
+  caddy_env
+
+  run write_caddyfile
+  [ "$status" -eq 0 ]
+
+  grep -q "order forward_proxy before file_server" "$CADDYFILE"
+  grep -q "127.0.0.1:21000 {" "$CADDYFILE"
+  grep -q "tls /tmp/fake-cert/fullchain.pem /tmp/fake-cert/privkey.pem" "$CADDYFILE"
+  grep -q "basic_auth user_abcd1234 supersecretpassword" "$CADDYFILE"
+  grep -q "hide_ip" "$CADDYFILE"
+  grep -q "hide_via" "$CADDYFILE"
+  grep -q "probe_resistance" "$CADDYFILE"
+  grep -q "root ${NAIVE_DOCROOT}" "$CADDYFILE"
+}
+
+@test "write_caddyfile does not reference the public domain in the site address (loopback only)" {
+  caddy_env
+
+  run write_caddyfile
+  [ "$status" -eq 0 ]
+  ! grep -q "naive.example.com" "$CADDYFILE"
+}
+
+@test "write_caddyfile validates the generated config when the caddy binary is present" {
+  caddy_env
+  NAIVE_BIN="${BATS_TEST_TMPDIR}/caddy"
+  cat > "$NAIVE_BIN" <<'EOF'
+#!/usr/bin/env bash
+echo "validate called: $*" >&2
+exit 0
+EOF
+  chmod +x "$NAIVE_BIN"
+
+  run write_caddyfile
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"validate called: validate --config"* ]]
+}
+
+@test "write_caddyfile fails clearly when caddy validate rejects the config" {
+  caddy_env
+  NAIVE_BIN="${BATS_TEST_TMPDIR}/caddy"
+  cat > "$NAIVE_BIN" <<'EOF'
+#!/usr/bin/env bash
+echo "bad config" >&2
+exit 1
+EOF
+  chmod +x "$NAIVE_BIN"
+
+  run write_caddyfile
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"Generated Caddyfile failed 'caddy validate'"* ]]
+}
+
+@test "write_naive_systemd_unit skips entirely when NAIVE_SUBDOMAIN is unset" {
+  caddy_env
+  NAIVE_SUBDOMAIN=""
+
+  run write_naive_systemd_unit
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"skipping NaiveProxy systemd unit"* ]]
+  [ ! -e "$NAIVE_SYSTEMD_UNIT" ]
+}
+
+@test "write_naive_systemd_unit generates a unit running as root with no bind capability" {
+  caddy_env
+  export SYSTEMCTL_LOG="${BATS_TEST_TMPDIR}/systemctl.log"
+  : > "$SYSTEMCTL_LOG"
+
+  run write_naive_systemd_unit
+  [ "$status" -eq 0 ]
+
+  grep -q "User=root" "$NAIVE_SYSTEMD_UNIT"
+  grep -q "ExecStart=${NAIVE_BIN} run --environ --config ${CADDYFILE}" "$NAIVE_SYSTEMD_UNIT"
+  ! grep -q "AmbientCapabilities" "$NAIVE_SYSTEMD_UNIT"
+  grep -q "systemctl enable caddy" "$SYSTEMCTL_LOG"
+  grep -q "systemctl restart caddy" "$SYSTEMCTL_LOG"
+}
+
+@test "write_naive_systemd_unit fails clearly when the service fails to start" {
+  caddy_env
+  export SYSTEMCTL_SHOULD_FAIL=1
+
+  run write_naive_systemd_unit
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"Failed to start the caddy (NaiveProxy) service"* ]]
+}
+
+@test "install_certbot_hook's deploy hook also reloads caddy when active" {
+  CERTBOT_DEPLOY_HOOK="${BATS_TEST_TMPDIR}/nginx-reload.sh"
+
+  run install_certbot_hook
+  [ "$status" -eq 0 ]
+  grep -q "systemctl is-active --quiet caddy" "$CERTBOT_DEPLOY_HOOK"
+  grep -q "systemctl reload caddy" "$CERTBOT_DEPLOY_HOOK"
+}
+
 @test "install_3xui_and_inbounds forwards generated inbound remarks to the panel helper" {
   CONFIG_FILE="${BATS_TEST_TMPDIR}/xui-proxy.conf"
   PANEL_PORT="51234"
@@ -1973,6 +2127,40 @@ setup_uninstall_fixtures() {
   grep -q "delete deny 2096/tcp" "$UFW_LOG"
   grep -q "delete deny 51235/tcp" "$UFW_LOG"
   grep -q "delete deny 51236/tcp" "$UFW_LOG"
+}
+
+@test "uninstall_all stops caddy and removes NaiveProxy files" {
+  setup_uninstall_fixtures
+
+  local installer_stub="${BATS_TEST_TMPDIR}/install-3xui.sh"
+  write_uninstall_stub "$installer_stub" "${BATS_TEST_TMPDIR}/installer-called"
+  export INSTALL_3XUI_SCRIPT="$installer_stub"
+
+  NAIVE_SYSTEMD_UNIT="${BATS_TEST_TMPDIR}/caddy.service"
+  CADDYFILE="${BATS_TEST_TMPDIR}/Caddyfile"
+  NAIVE_BIN="${BATS_TEST_TMPDIR}/caddy-bin"
+  NAIVE_VERSION_FILE="${BATS_TEST_TMPDIR}/naiveproxy-state/.installed-version"
+  NAIVE_DOCROOT="${BATS_TEST_TMPDIR}/naive-docroot"
+  : > "$NAIVE_SYSTEMD_UNIT"
+  : > "$CADDYFILE"
+  : > "$NAIVE_BIN"
+  install -d "$(dirname -- "$NAIVE_VERSION_FILE")"
+  : > "$NAIVE_VERSION_FILE"
+  install -d "$NAIVE_DOCROOT"
+
+  export SYSTEMCTL_LOG="${BATS_TEST_TMPDIR}/systemctl.log"
+  : > "$SYSTEMCTL_LOG"
+
+  run uninstall_all <<< "y"
+  [ "$status" -eq 0 ]
+
+  grep -q "systemctl stop caddy" "$SYSTEMCTL_LOG"
+  grep -q "systemctl disable caddy" "$SYSTEMCTL_LOG"
+  [ ! -e "$NAIVE_SYSTEMD_UNIT" ]
+  [ ! -e "$CADDYFILE" ]
+  [ ! -e "$NAIVE_BIN" ]
+  [ ! -e "$NAIVE_VERSION_FILE" ]
+  [ ! -d "$NAIVE_DOCROOT" ]
 }
 
 @test "uninstall_all keeps the certbot cert by default" {

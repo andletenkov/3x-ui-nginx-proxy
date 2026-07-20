@@ -834,6 +834,125 @@ for asset in data.get('assets', []):
   echo "NaiveProxy ${tag} installed to ${NAIVE_BIN}." >&2
 }
 
+CADDYFILE="/etc/caddy/Caddyfile"
+NAIVE_DOCROOT="/var/www/naiveproxy"
+NAIVE_SYSTEMD_UNIT="/etc/systemd/system/caddy.service"
+
+# Populates the decoy file_server root Caddy serves to anyone who reaches it
+# without valid forward_proxy credentials. Reuses the same content as the
+# CDN inbounds' Nginx fallback page (FALLBACK_HTML_PATH) when set, so there
+# is only one "what does an anonymous visitor see" page to maintain.
+prepare_naive_docroot() {
+  install -d -m 755 "$NAIVE_DOCROOT"
+
+  if [[ -n "$FALLBACK_HTML_PATH" ]]; then
+    [[ -f "$FALLBACK_HTML_PATH" && -r "$FALLBACK_HTML_PATH" ]] ||
+      die "FALLBACK_HTML_PATH must point to a readable regular file: ${FALLBACK_HTML_PATH}"
+    install -m 644 "$FALLBACK_HTML_PATH" "${NAIVE_DOCROOT}/index.html"
+  elif [[ ! -f "${NAIVE_DOCROOT}/index.html" ]]; then
+    printf '<!DOCTYPE html><html><head><title>It works!</title></head><body><h1>It works!</h1></body></html>\n' \
+      > "${NAIVE_DOCROOT}/index.html"
+    chmod 644 "${NAIVE_DOCROOT}/index.html"
+  fi
+}
+
+# Generates the Caddyfile for NaiveProxy. Caddy binds loopback only
+# (127.0.0.1:NAIVE_PORT) -- it is reached publicly via Nginx's stream/
+# ssl_preread SNI passthrough on port 443, not directly. Reuses the existing
+# Let's Encrypt wildcard cert (CERT_DIR) instead of Caddy's own ACME, since
+# Caddy never sees a public HTTP-01/TLS-ALPN-01-reachable listener anyway.
+write_caddyfile() {
+  [[ -n "$NAIVE_SUBDOMAIN" ]] || {
+    echo "NAIVE_SUBDOMAIN not set, skipping Caddyfile." >&2
+    return
+  }
+
+  echo "Writing Caddyfile..." >&2
+
+  prepare_naive_docroot
+
+  install -d -m 755 "$(dirname -- "$CADDYFILE")"
+
+  local tmp_caddyfile
+  tmp_caddyfile="$(make_tmp_file)"
+
+  cat > "$tmp_caddyfile" <<EOF
+{
+    order forward_proxy before file_server
+    log {
+        exclude http.log.error
+    }
+}
+127.0.0.1:${NAIVE_PORT} {
+    tls ${CERT_DIR}/fullchain.pem ${CERT_DIR}/privkey.pem
+    encode
+    forward_proxy {
+        basic_auth ${NAIVE_USERNAME} ${NAIVE_PASSWORD}
+        hide_ip
+        hide_via
+        probe_resistance
+    }
+    file_server {
+        root ${NAIVE_DOCROOT}
+    }
+}
+EOF
+
+  mv "$tmp_caddyfile" "$CADDYFILE"
+  chmod 644 "$CADDYFILE"
+
+  if [[ -x "$NAIVE_BIN" ]]; then
+    "$NAIVE_BIN" validate --config "$CADDYFILE" ||
+      die "Generated Caddyfile failed 'caddy validate'; check ${CADDYFILE}."
+  fi
+}
+
+# Installs and (re)starts the systemd unit for NaiveProxy. Runs as root
+# rather than a dedicated unprivileged user (the pattern klzgrad's own wiki
+# recommends): Caddy here reads the same root-owned Let's Encrypt cert files
+# Nginx uses, and it never binds a privileged port (loopback high port
+# only), so the usual justification for AmbientCapabilities=CAP_NET_BIND_SERVICE
+# + a dedicated user doesn't apply, and avoiding ACL/copy-cert complexity for
+# a single-purpose VPS keeps this simpler.
+write_naive_systemd_unit() {
+  [[ -n "$NAIVE_SUBDOMAIN" ]] || {
+    echo "NAIVE_SUBDOMAIN not set, skipping NaiveProxy systemd unit." >&2
+    return
+  }
+
+  echo "Installing NaiveProxy systemd unit..." >&2
+
+  cat > "$NAIVE_SYSTEMD_UNIT" <<EOF
+[Unit]
+Description=NaiveProxy (Caddy + forwardproxy)
+Documentation=https://github.com/klzgrad/naiveproxy
+After=network.target network-online.target
+Requires=network-online.target
+
+[Service]
+User=root
+Group=root
+ExecStart=${NAIVE_BIN} run --environ --config ${CADDYFILE}
+ExecReload=${NAIVE_BIN} reload --config ${CADDYFILE}
+TimeoutStopSec=5s
+LimitNOFILE=1048576
+LimitNPROC=512
+PrivateTmp=true
+Restart=on-failure
+RestartSec=5s
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+  chmod 644 "$NAIVE_SYSTEMD_UNIT"
+
+  systemctl daemon-reload
+  systemctl enable caddy >/dev/null 2>&1 || true
+  systemctl restart caddy ||
+    die "Failed to start the caddy (NaiveProxy) service; check 'systemctl status caddy' and 'journalctl -u caddy'."
+}
+
 write_cloudflare_credentials() {
   echo "[2/8] Writing Cloudflare credentials..."
 
@@ -877,6 +996,8 @@ set -eu
 
 nginx -t
 systemctl reload nginx
+# Harmless no-op if NaiveProxy/Caddy isn't installed or running.
+systemctl is-active --quiet caddy 2>/dev/null && systemctl reload caddy || true
 EOF
 
   chmod 755 "$CERTBOT_DEPLOY_HOOK"
@@ -1686,6 +1807,18 @@ uninstall_all() {
     ufw reload >/dev/null 2>&1 || true
   fi
 
+  echo "--- NaiveProxy ---"
+  if command -v systemctl >/dev/null 2>&1; then
+    systemctl stop caddy >/dev/null 2>&1 || true
+    systemctl disable caddy >/dev/null 2>&1 || true
+  fi
+  rm -f "${NAIVE_SYSTEMD_UNIT:-/etc/systemd/system/caddy.service}"
+  systemctl daemon-reload >/dev/null 2>&1 || true
+  rm -f "${CADDYFILE:-/etc/caddy/Caddyfile}"
+  rm -f "${NAIVE_BIN:-/usr/bin/caddy}"
+  rm -rf "$(dirname -- "${NAIVE_VERSION_FILE:-/usr/local/naiveproxy/.installed-version}")"
+  rm -rf "${NAIVE_DOCROOT:-/var/www/naiveproxy}"
+
   echo "--- 3x-ui ---"
   if [[ -x "$installer_script" ]]; then
     "$installer_script" --uninstall || echo "WARNING: setup-3x-ui.sh --uninstall reported an error; check manually." >&2
@@ -1738,6 +1871,8 @@ main() {
   write_cloudflare_credentials
   issue_certificate
   install_certbot_hook
+  write_caddyfile
+  write_naive_systemd_unit
   write_cloudflare_real_ip_config
   write_nginx_config
   configure_ufw
