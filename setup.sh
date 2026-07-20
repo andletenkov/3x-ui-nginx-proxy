@@ -50,6 +50,14 @@ NAIVE_PORT=""
 NAIVE_USERNAME=""
 NAIVE_PASSWORD=""
 
+# Internal loopback ports used only when the Nginx stream{} SNI Guard is
+# active (i.e. Reality or NaiveProxy is enabled): the CDN server blocks move
+# off public 443 onto NGINX_CDN_PORT, and unmatched-SNI probes are routed to
+# a decoy vhost on NGINX_DECOY_PORT. Both blank when neither feature is on --
+# in that case Nginx keeps binding 443 directly, exactly as before.
+NGINX_CDN_PORT=""
+NGINX_DECOY_PORT=""
+
 VPS_FLAG=""
 # Optional ISO 3166-1 alpha-2 country code for inbound labels. When unset,
 # the code is detected from the server's public IP.
@@ -145,6 +153,8 @@ NAIVE_SUBDOMAIN="${NAIVE_SUBDOMAIN}"
 NAIVE_PORT="${NAIVE_PORT}"
 NAIVE_USERNAME="${NAIVE_USERNAME}"
 NAIVE_PASSWORD="${NAIVE_PASSWORD}"
+NGINX_CDN_PORT="${NGINX_CDN_PORT}"
+NGINX_DECOY_PORT="${NGINX_DECOY_PORT}"
 VPS_COUNTRY_CODE="${VPS_COUNTRY_CODE}"
 EOF
   chmod 600 "$CONFIG_FILE"
@@ -427,6 +437,28 @@ validate_inputs() {
       die "NaiveProxy port cannot be 443 (reserved for the public HTTPS listener)."
   fi
 
+  # The stream{} SNI Guard's two internal ports -- required together exactly
+  # when Reality or NaiveProxy is enabled, since that's the only time the
+  # guard exists at all.
+  if [[ -n "$REALITY_SUBDOMAIN" || -n "$NAIVE_SUBDOMAIN" ]]; then
+    validate_port "Nginx CDN internal port" "$NGINX_CDN_PORT"
+    validate_port "Nginx decoy internal port" "$NGINX_DECOY_PORT"
+
+    [[ "$NGINX_CDN_PORT" != "$NGINX_DECOY_PORT" ]] ||
+      die "Nginx CDN and decoy internal ports must be different."
+
+    local guard_other_port
+    for guard_other_port in "$SUB_PORT" "$WS_PORT" "$GRPC_PORT" "$XHTTP_PORT" "$PANEL_PORT" "${REALITY_PORT:-}" "${NAIVE_PORT:-}"; do
+      [[ -z "$guard_other_port" || "$NGINX_CDN_PORT" != "$guard_other_port" ]] ||
+        die "Nginx CDN internal port must be different from every other internal port."
+      [[ -z "$guard_other_port" || "$NGINX_DECOY_PORT" != "$guard_other_port" ]] ||
+        die "Nginx decoy internal port must be different from every other internal port."
+    done
+
+    [[ "$NGINX_CDN_PORT" != "443" && "$NGINX_DECOY_PORT" != "443" ]] ||
+      die "Nginx CDN/decoy internal ports cannot be 443 (reserved for the public HTTPS listener)."
+  fi
+
   normalize_ws_path
   normalize_xhttp_path
   normalize_sub_path
@@ -590,6 +622,19 @@ collect_input() {
     NAIVE_PORT=""
     NAIVE_USERNAME=""
     NAIVE_PASSWORD=""
+  fi
+
+  # The stream{} SNI Guard (and its two internal ports) is only needed once
+  # a direct-connection feature exists to route to.
+  if [[ -n "$REALITY_SUBDOMAIN" || -n "$NAIVE_SUBDOMAIN" ]]; then
+    NGINX_CDN_PORT="${NGINX_CDN_PORT:-$(random_free_port "443" "$SUB_PORT" "$WS_PORT" "$GRPC_PORT" "$XHTTP_PORT" "$PANEL_PORT" "${REALITY_PORT:-}" "${NAIVE_PORT:-}")}"
+    validate_port "Nginx CDN internal port" "$NGINX_CDN_PORT"
+
+    NGINX_DECOY_PORT="${NGINX_DECOY_PORT:-$(random_free_port "443" "$SUB_PORT" "$WS_PORT" "$GRPC_PORT" "$XHTTP_PORT" "$PANEL_PORT" "${REALITY_PORT:-}" "${NAIVE_PORT:-}" "$NGINX_CDN_PORT")}"
+    validate_port "Nginx decoy internal port" "$NGINX_DECOY_PORT"
+  else
+    NGINX_CDN_PORT=""
+    NGINX_DECOY_PORT=""
   fi
 
   validate_inputs
@@ -1071,6 +1116,10 @@ write_cloudflare_real_ip_config() {
 }
 
 nginx_listen_directive() {
+  # $1: listen target, e.g. "443" (default) or "127.0.0.1:20010" -- the
+  # latter is used for the CDN server blocks once the stream{} SNI Guard
+  # takes over the public 443 listener (see write_nginx_config).
+  local listen_target="${1:-443}"
   local version=""
   local major=0
   local minor=0
@@ -1087,11 +1136,88 @@ nginx_listen_directive() {
   # `http2 on;` as a separate directive was introduced in nginx 1.25.1.
   # Older versions only understand the combined `listen ... http2;` form.
   if ((major > 1 || (major == 1 && minor > 25) || (major == 1 && minor == 25 && patch >= 1))); then
-    printf '%s\n' "listen 443 ssl;
+    printf '%s\n' "listen ${listen_target} ssl;
     http2 on;"
   else
-    printf '%s\n' "listen 443 ssl http2;"
+    printf '%s\n' "listen ${listen_target} ssl http2;"
   fi
+}
+
+NGINX_STREAM_CONF="/etc/nginx/stream.d/3xui-proxy-sni-guard.conf"
+NGINX_STREAM_CONF_DIR="/etc/nginx/stream.d"
+NGINX_MAIN_CONF="/etc/nginx/nginx.conf"
+NGINX_STREAM_MARKER_BEGIN="# BEGIN 3xui-cf-setup stream"
+NGINX_STREAM_MARKER_END="# END 3xui-cf-setup stream"
+
+# Adds a top-level `stream {}` context to nginx.conf that includes
+# NGINX_STREAM_CONF_DIR/*.conf, if not already present. Nginx.org's default
+# nginx.conf has no stream{} block by default. Idempotent and marker-
+# delimited so it can be cleanly reverted on --uninstall.
+ensure_nginx_stream_context() {
+  install -d -m 755 "$NGINX_STREAM_CONF_DIR"
+
+  [[ -f "$NGINX_MAIN_CONF" ]] ||
+    die "${NGINX_MAIN_CONF} not found; is Nginx installed?"
+
+  if grep -qF "$NGINX_STREAM_MARKER_BEGIN" "$NGINX_MAIN_CONF"; then
+    return
+  fi
+
+  cat >> "$NGINX_MAIN_CONF" <<EOF
+
+${NGINX_STREAM_MARKER_BEGIN}
+stream {
+    include ${NGINX_STREAM_CONF_DIR}/*.conf;
+}
+${NGINX_STREAM_MARKER_END}
+EOF
+}
+
+# Reverts ensure_nginx_stream_context's edit, if present.
+unensure_nginx_stream_context() {
+  [[ -f "$NGINX_MAIN_CONF" ]] || return 0
+  sed -i.bak "/^${NGINX_STREAM_MARKER_BEGIN}\$/,/^${NGINX_STREAM_MARKER_END}\$/d" "$NGINX_MAIN_CONF"
+  rm -f "${NGINX_MAIN_CONF}.bak"
+}
+
+# Generates the stream{} SNI Guard: routes port 443 traffic by SNI to the
+# CDN inbounds (unchanged Nginx http server blocks, now on loopback), the
+# NaiveProxy/Reality direct-connection backends, or a decoy vhost for any
+# other SNI. Only called when Reality or NaiveProxy is enabled.
+write_nginx_stream_config() {
+  local panel_domain="${PANEL_SUBDOMAIN}.${BASE_DOMAIN}"
+  local vless_domain="${VLESS_SUBDOMAIN}.${BASE_DOMAIN}"
+  local naive_domain="${NAIVE_SUBDOMAIN:+${NAIVE_SUBDOMAIN}.${BASE_DOMAIN}}"
+
+  local tmp_stream
+  tmp_stream="$(make_tmp_file)"
+
+  {
+    echo "map \$ssl_preread_server_name \$sni_upstream {"
+    echo "    ${panel_domain}    cdn;"
+    echo "    ${vless_domain}    cdn;"
+    [[ -z "$naive_domain" ]] || echo "    ${naive_domain}    naive;"
+    [[ -z "$REALITY_SUBDOMAIN" ]] || echo "    ${REALITY_DEST}    reality;"
+    echo "    default    decoy;"
+    echo "}"
+    echo
+    echo "upstream cdn { server 127.0.0.1:${NGINX_CDN_PORT}; }"
+    echo "upstream decoy { server 127.0.0.1:${NGINX_DECOY_PORT}; }"
+    [[ -z "$naive_domain" ]] || echo "upstream naive { server 127.0.0.1:${NAIVE_PORT}; }"
+    [[ -z "$REALITY_SUBDOMAIN" ]] || echo "upstream reality { server 127.0.0.1:${REALITY_PORT}; }"
+    echo
+    echo "server {"
+    echo "    listen 443 reuseport;"
+    echo "    listen [::]:443 reuseport;"
+    echo "    ssl_preread on;"
+    echo "    proxy_pass \$sni_upstream;"
+    echo "    proxy_connect_timeout 5s;"
+    echo "    proxy_timeout 300s;"
+    echo "}"
+  } > "$tmp_stream"
+
+  mv "$tmp_stream" "$NGINX_STREAM_CONF"
+  chmod 644 "$NGINX_STREAM_CONF"
 }
 
 check_port_443() {
@@ -1187,10 +1313,49 @@ write_nginx_config() {
   local vless_fallback_location
   local tmp_nginx
   local backup=""
+  local stream_backup=""
   local default_site_was_enabled=false
   local listen_directive
+  local decoy_server_block=""
+  local stream_mode=false
 
-  listen_directive="$(nginx_listen_directive)"
+  # The stream{} SNI Guard only exists once there's a direct-connection
+  # backend (Reality or NaiveProxy) to route to it. Otherwise Nginx keeps
+  # binding 443 directly, exactly as it always has -- zero behavior change
+  # for anyone not using those optional features.
+  if [[ -n "$REALITY_SUBDOMAIN" || -n "$NAIVE_SUBDOMAIN" ]]; then
+    stream_mode=true
+  fi
+
+  if [[ "$stream_mode" == true ]]; then
+    listen_directive="$(nginx_listen_directive "127.0.0.1:${NGINX_CDN_PORT}")"
+    prepare_naive_docroot
+    decoy_server_block="$(cat <<DECOYEOF
+
+server {
+    listen 127.0.0.1:${NGINX_DECOY_PORT} ssl;
+    http2 on;
+    server_name _;
+
+    ssl_certificate ${CERT_DIR}/fullchain.pem;
+    ssl_certificate_key ${CERT_DIR}/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+
+    server_tokens off;
+
+    root ${NAIVE_DOCROOT};
+    index index.html;
+
+    location / {
+        try_files \$uri \$uri/ =404;
+    }
+}
+DECOYEOF
+)"
+  else
+    listen_directive="$(nginx_listen_directive)"
+  fi
+
   vless_fallback_location="$(nginx_vless_fallback_location)"
 
   tmp_nginx="$(make_tmp_file)"
@@ -1314,6 +1479,7 @@ server {
         return 404;
     }
 }
+${decoy_server_block}
 EOF
 
   if [[ -e "$NGINX_SITE" ]]; then
@@ -1331,6 +1497,23 @@ EOF
   ln -sfn "$NGINX_SITE" "$NGINX_SITE_ENABLED"
   rm -f /etc/nginx/sites-enabled/default
 
+  if [[ "$stream_mode" == true ]]; then
+    ensure_nginx_stream_context
+
+    if [[ -e "$NGINX_STREAM_CONF" ]]; then
+      stream_backup="${NGINX_STREAM_CONF}.backup-${TIMESTAMP}"
+      cp -a "$NGINX_STREAM_CONF" "$stream_backup"
+    fi
+
+    write_nginx_stream_config
+  else
+    # Feature(s) disabled on this run -- remove any previously-generated
+    # SNI Guard config so a stale stream.d file doesn't linger. The
+    # top-level `stream {}` include in nginx.conf is left in place (inert,
+    # harmless with an empty stream.d/ directory) rather than reverted here.
+    rm -f "$NGINX_STREAM_CONF"
+  fi
+
   if ! nginx -t; then
     echo "ERROR: New Nginx configuration is invalid."
     echo "Restoring previous configuration..."
@@ -1341,6 +1524,12 @@ EOF
     else
       rm -f "$NGINX_SITE"
       rm -f "$NGINX_SITE_ENABLED"
+    fi
+
+    if [[ -n "$stream_backup" ]]; then
+      cp -a "$stream_backup" "$NGINX_STREAM_CONF"
+    elif [[ "$stream_mode" == true ]]; then
+      rm -f "$NGINX_STREAM_CONF"
     fi
 
     if [[ "$default_site_was_enabled" == true ]]; then
@@ -1381,6 +1570,8 @@ configure_ufw() {
   local prev_xhttp_port=""
   local prev_reality_port=""
   local prev_naive_port=""
+  local prev_nginx_cdn_port=""
+  local prev_nginx_decoy_port=""
 
   if [[ -f "$STATE_FILE" ]]; then
     # shellcheck disable=SC1090
@@ -1392,10 +1583,12 @@ configure_ufw() {
     prev_xhttp_port="${STATE_XHTTP_PORT:-}"
     prev_reality_port="${STATE_REALITY_PORT:-}"
     prev_naive_port="${STATE_NAIVE_PORT:-}"
+    prev_nginx_cdn_port="${STATE_NGINX_CDN_PORT:-}"
+    prev_nginx_decoy_port="${STATE_NGINX_DECOY_PORT:-}"
   fi
 
   # Remove stale deny rules left over from a previous run with different ports.
-  for stale_port in "$prev_panel_port" "$prev_sub_port" "$prev_ws_port" "$prev_grpc_port" "$prev_xhttp_port" "$prev_reality_port" "$prev_naive_port"; do
+  for stale_port in "$prev_panel_port" "$prev_sub_port" "$prev_ws_port" "$prev_grpc_port" "$prev_xhttp_port" "$prev_reality_port" "$prev_naive_port" "$prev_nginx_cdn_port" "$prev_nginx_decoy_port"; do
     if [[ -n "$stale_port" ]] &&
        [[ "$stale_port" != "$PANEL_PORT" ]] &&
        [[ "$stale_port" != "$SUB_PORT" ]] &&
@@ -1403,7 +1596,9 @@ configure_ufw() {
        [[ "$stale_port" != "$GRPC_PORT" ]] &&
        [[ "$stale_port" != "$XHTTP_PORT" ]] &&
        [[ "$stale_port" != "${REALITY_PORT:-}" ]] &&
-       [[ "$stale_port" != "${NAIVE_PORT:-}" ]]; then
+       [[ "$stale_port" != "${NAIVE_PORT:-}" ]] &&
+       [[ "$stale_port" != "${NGINX_CDN_PORT:-}" ]] &&
+       [[ "$stale_port" != "${NGINX_DECOY_PORT:-}" ]]; then
       ufw delete deny "${stale_port}/tcp" || true
     fi
   done
@@ -1427,6 +1622,8 @@ configure_ufw() {
   ufw deny "${XHTTP_PORT}/tcp" || true
   [[ -z "${REALITY_PORT:-}" ]] || ufw deny "${REALITY_PORT}/tcp" || true
   [[ -z "${NAIVE_PORT:-}" ]] || ufw deny "${NAIVE_PORT}/tcp" || true
+  [[ -z "${NGINX_CDN_PORT:-}" ]] || ufw deny "${NGINX_CDN_PORT}/tcp" || true
+  [[ -z "${NGINX_DECOY_PORT:-}" ]] || ufw deny "${NGINX_DECOY_PORT}/tcp" || true
 
   ufw --force enable
   ufw reload
@@ -1439,6 +1636,8 @@ STATE_GRPC_PORT=${GRPC_PORT}
 STATE_XHTTP_PORT=${XHTTP_PORT}
 STATE_REALITY_PORT=${REALITY_PORT:-}
 STATE_NAIVE_PORT=${NAIVE_PORT:-}
+STATE_NGINX_CDN_PORT=${NGINX_CDN_PORT:-}
+STATE_NGINX_DECOY_PORT=${NGINX_DECOY_PORT:-}
 EOF
   chmod 600 "$STATE_FILE"
 }
@@ -1771,6 +1970,8 @@ uninstall_all() {
   echo
   echo "--- Nginx ---"
   rm -f "$NGINX_SITE_ENABLED" "$NGINX_SITE" "$CF_REAL_IP_CONF" "$FALLBACK_HTML_DEST"
+  rm -f "${NGINX_STREAM_CONF:-/etc/nginx/stream.d/3xui-proxy-sni-guard.conf}"
+  unensure_nginx_stream_context
   if command -v nginx >/dev/null 2>&1; then
     nginx -t >/dev/null 2>&1 && (systemctl reload nginx || systemctl restart nginx) || true
   fi
@@ -1801,7 +2002,7 @@ uninstall_all() {
     fi
     ufw delete deny 443/tcp >/dev/null 2>&1 || true
     ufw delete deny 80/tcp >/dev/null 2>&1 || true
-    for p in "${PANEL_PORT:-}" "${SUB_PORT:-}" "${WS_PORT:-}" "${GRPC_PORT:-}" "${XHTTP_PORT:-}" "${REALITY_PORT:-}" "${NAIVE_PORT:-}"; do
+    for p in "${PANEL_PORT:-}" "${SUB_PORT:-}" "${WS_PORT:-}" "${GRPC_PORT:-}" "${XHTTP_PORT:-}" "${REALITY_PORT:-}" "${NAIVE_PORT:-}" "${NGINX_CDN_PORT:-}" "${NGINX_DECOY_PORT:-}"; do
       [[ -n "$p" ]] && ufw delete deny "${p}/tcp" >/dev/null 2>&1 || true
     done
     ufw reload >/dev/null 2>&1 || true

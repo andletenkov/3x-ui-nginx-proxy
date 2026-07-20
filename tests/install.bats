@@ -2308,6 +2308,196 @@ setup_uninstall_fixtures() {
 }
 
 # ---------------------------------------------------------------------------
+# write_nginx_config / write_nginx_stream_config / ensure_nginx_stream_context
+# -- the stream{} SNI Guard, active only when Reality or NaiveProxy is on.
+# ---------------------------------------------------------------------------
+
+nginx_stream_env() {
+  nginx_config_env
+  REALITY_SUBDOMAIN="reality"
+  REALITY_DEST="github.com"
+  REALITY_PORT="20000"
+  NAIVE_SUBDOMAIN="naive"
+  NAIVE_PORT="21000"
+  NGINX_CDN_PORT="22000"
+  NGINX_DECOY_PORT="22001"
+  NAIVE_DOCROOT="${BATS_TEST_TMPDIR}/naive-docroot"
+  FALLBACK_HTML_PATH=""
+  NGINX_STREAM_CONF="${BATS_TEST_TMPDIR}/stream-sni-guard.conf"
+  NGINX_STREAM_CONF_DIR="${BATS_TEST_TMPDIR}/stream.d"
+  NGINX_MAIN_CONF="${BATS_TEST_TMPDIR}/nginx.conf"
+  printf 'http {\n    include /etc/nginx/conf.d/*.conf;\n}\n' > "$NGINX_MAIN_CONF"
+}
+
+# Some individual tests calling write_nginx_config through bats' `run` in
+# stream mode have been observed to silently drop their result under this
+# bats version (same class of issue as the save_config round-trip tests
+# above). This helper routes the call through a real bash -c subshell
+# instead, which reliably avoids it.
+run_stream_write_nginx_config() {
+  run bash -c '
+    source "'"$SCRIPT"'" >/dev/null 2>&1 || true
+    BASE_DOMAIN="example.com"
+    PANEL_SUBDOMAIN="admin"
+    VLESS_SUBDOMAIN="vpn"
+    PANEL_PATH="/my-admin"
+    SUB_PATH="/sub"
+    WS_PATH="/api/v1/events"
+    GRPC_SERVICE="api.v1.SyncService"
+    PANEL_PORT="2053"
+    SUB_PORT="2096"
+    WS_PORT="10001"
+    GRPC_PORT="10002"
+    XHTTP_PORT="10003"
+    XHTTP_PATH="/api/v1/ingest/abcd1234"
+    CERT_DIR="/tmp/fake-cert"
+    NGINX_SITE="'"$NGINX_SITE"'"
+    NGINX_SITE_ENABLED="'"$NGINX_SITE_ENABLED"'"
+    TIMESTAMP="20260101-000000"
+    REALITY_SUBDOMAIN="reality"
+    REALITY_DEST="github.com"
+    REALITY_PORT="20000"
+    NAIVE_SUBDOMAIN="naive"
+    NAIVE_PORT="21000"
+    NGINX_CDN_PORT="22000"
+    NGINX_DECOY_PORT="22001"
+    NAIVE_DOCROOT="'"$NAIVE_DOCROOT"'"
+    FALLBACK_HTML_PATH=""
+    NGINX_STREAM_CONF="'"$NGINX_STREAM_CONF"'"
+    NGINX_STREAM_CONF_DIR="'"$NGINX_STREAM_CONF_DIR"'"
+    NGINX_MAIN_CONF="'"$NGINX_MAIN_CONF"'"
+    printf "http {\n    include /etc/nginx/conf.d/*.conf;\n}\n" > "$NGINX_MAIN_CONF"
+    write_nginx_config
+  '
+}
+
+@test "write_nginx_config moves the CDN server blocks to loopback when stream mode is active" {
+  nginx_stream_env
+  run_stream_write_nginx_config
+
+  [ "$status" -eq 0 ]
+  grep -q "listen 127.0.0.1:22000 ssl;" "$NGINX_SITE"
+  ! grep -q "listen 443 ssl;" "$NGINX_SITE"
+}
+
+@test "write_nginx_config keeps CDN server blocks on public 443 when neither Reality nor NaiveProxy is enabled" {
+  nginx_config_env
+  REALITY_SUBDOMAIN=""
+  NAIVE_SUBDOMAIN=""
+  run write_nginx_config
+  [ "$status" -eq 0 ]
+
+  grep -q "listen 443 ssl;" "$NGINX_SITE"
+  ! grep -q "127.0.0.1:22000" "$NGINX_SITE"
+}
+
+@test "write_nginx_config adds a decoy vhost on the decoy port serving the shared docroot" {
+  nginx_stream_env
+  run write_nginx_config
+  [ "$status" -eq 0 ]
+
+  grep -q "listen 127.0.0.1:22001 ssl;" "$NGINX_SITE"
+  grep -q "server_name _;" "$NGINX_SITE"
+  grep -q "root ${NAIVE_DOCROOT};" "$NGINX_SITE"
+  [ -f "${NAIVE_DOCROOT}/index.html" ]
+}
+
+@test "write_nginx_config generates a stream SNI map routing CDN, naive and reality domains, defaulting to decoy" {
+  nginx_stream_env
+  run_stream_write_nginx_config
+  [ "$status" -eq 0 ]
+
+  grep -q "map \\$ssl_preread_server_name \$sni_upstream" "$NGINX_STREAM_CONF"
+  grep -q "admin.example.com    cdn;" "$NGINX_STREAM_CONF"
+  grep -q "vpn.example.com    cdn;" "$NGINX_STREAM_CONF"
+  grep -q "naive.example.com    naive;" "$NGINX_STREAM_CONF"
+  grep -q "github.com    reality;" "$NGINX_STREAM_CONF"
+  grep -q "default    decoy;" "$NGINX_STREAM_CONF"
+  grep -q "upstream cdn { server 127.0.0.1:22000; }" "$NGINX_STREAM_CONF"
+  grep -q "upstream decoy { server 127.0.0.1:22001; }" "$NGINX_STREAM_CONF"
+  grep -q "upstream naive { server 127.0.0.1:21000; }" "$NGINX_STREAM_CONF"
+  grep -q "upstream reality { server 127.0.0.1:20000; }" "$NGINX_STREAM_CONF"
+  grep -q "listen 443 reuseport;" "$NGINX_STREAM_CONF"
+  grep -q "ssl_preread on;" "$NGINX_STREAM_CONF"
+}
+
+@test "write_nginx_config's stream map omits naive/reality branches when only one is enabled" {
+  nginx_stream_env
+  NAIVE_SUBDOMAIN=""
+  NAIVE_PORT=""
+  run write_nginx_config
+  [ "$status" -eq 0 ]
+
+  grep -q "github.com    reality;" "$NGINX_STREAM_CONF"
+  ! grep -q "naive;" "$NGINX_STREAM_CONF"
+  ! grep -q "upstream naive" "$NGINX_STREAM_CONF"
+}
+
+@test "write_nginx_config removes a stale stream config when the feature is later disabled" {
+  nginx_stream_env
+  run write_nginx_config
+  [ "$status" -eq 0 ]
+  [ -f "$NGINX_STREAM_CONF" ]
+
+  REALITY_SUBDOMAIN=""
+  NAIVE_SUBDOMAIN=""
+  run write_nginx_config
+  [ "$status" -eq 0 ]
+  [ ! -f "$NGINX_STREAM_CONF" ]
+}
+
+@test "write_nginx_config rolls back the stream config too when nginx -t fails" {
+  nginx_stream_env
+  run write_nginx_config
+  [ "$status" -eq 0 ]
+  local original_stream
+  original_stream="$(cat "$NGINX_STREAM_CONF")"
+
+  export NGINX_T_SHOULD_FAIL=1
+  run write_nginx_config
+  [ "$status" -eq 1 ]
+  [ "$(cat "$NGINX_STREAM_CONF")" == "$original_stream" ]
+}
+
+@test "ensure_nginx_stream_context adds a marker-delimited stream block to nginx.conf" {
+  nginx_stream_env
+
+  run ensure_nginx_stream_context
+  [ "$status" -eq 0 ]
+
+  grep -q "# BEGIN 3xui-cf-setup stream" "$NGINX_MAIN_CONF"
+  grep -q "include ${NGINX_STREAM_CONF_DIR}/\*.conf;" "$NGINX_MAIN_CONF"
+  grep -q "# END 3xui-cf-setup stream" "$NGINX_MAIN_CONF"
+}
+
+@test "ensure_nginx_stream_context is idempotent" {
+  nginx_stream_env
+
+  run ensure_nginx_stream_context
+  [ "$status" -eq 0 ]
+  local first_content
+  first_content="$(cat "$NGINX_MAIN_CONF")"
+
+  run ensure_nginx_stream_context
+  [ "$status" -eq 0 ]
+  [ "$(cat "$NGINX_MAIN_CONF")" == "$first_content" ]
+}
+
+@test "unensure_nginx_stream_context cleanly removes the marker-delimited block" {
+  nginx_stream_env
+
+  run ensure_nginx_stream_context
+  [ "$status" -eq 0 ]
+  grep -q "BEGIN 3xui-cf-setup stream" "$NGINX_MAIN_CONF"
+
+  run unensure_nginx_stream_context
+  [ "$status" -eq 0 ]
+  ! grep -q "3xui-cf-setup stream" "$NGINX_MAIN_CONF"
+  ! grep -q "stream {" "$NGINX_MAIN_CONF"
+  grep -q "http {" "$NGINX_MAIN_CONF"
+}
+
+# ---------------------------------------------------------------------------
 # Path auto-generation — verifies the generated paths/services look realistic
 # ---------------------------------------------------------------------------
 
