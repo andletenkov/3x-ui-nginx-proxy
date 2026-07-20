@@ -823,14 +823,15 @@ install_naiveproxy() {
 
   echo "Installing NaiveProxy (Caddy + forwardproxy)..." >&2
 
-  local arch tag asset_name download_url release_json
+  local arch tag asset_name download_url
   arch="$(naive_map_arch "$(uname -m)")"
 
-  release_json="$(curl -fsSL "$NAIVE_RELEASES_API")" ||
-    die "Failed to fetch the latest NaiveProxy release metadata."
-
-  tag="$(python3 -c "import json,sys; print(json.loads(sys.argv[1])['tag_name'])" "$release_json")" ||
-    die "Failed to parse the NaiveProxy release tag. Response: ${release_json}"
+  tag="$(
+    curl -sI https://github.com/klzgrad/naiveproxy/releases/latest \
+    | awk -F'/tag/' 'tolower($1) ~ /^location:/ {print $2}' \
+    | tr -d '\r'
+  )" ||
+    die "Failed to parse the NaiveProxy latest release tag"
 
   if [[ -f "$NAIVE_VERSION_FILE" ]] && [[ "$(cat "$NAIVE_VERSION_FILE")" == "$tag" ]] && [[ -x "$NAIVE_BIN" ]]; then
     echo "NaiveProxy ${tag} already installed, skipping." >&2
@@ -838,15 +839,7 @@ install_naiveproxy() {
   fi
 
   asset_name="naiveproxy-${tag}-linux-${arch}.tar.xz"
-  download_url="$(python3 -c "
-import json,sys
-data = json.loads(sys.argv[1])
-name = sys.argv[2]
-for asset in data.get('assets', []):
-    if asset.get('name') == name:
-        print(asset['browser_download_url'])
-        break
-" "$release_json" "$asset_name")"
+  download_url="https://github.com/klzgrad/naiveproxy/releases/download/${tag}/${asset_name}"
 
   [[ -n "$download_url" ]] ||
     die "Could not find NaiveProxy release asset '${asset_name}' (release ${tag}) for this architecture."
@@ -861,7 +854,7 @@ for asset in data.get('assets', []):
   tar -xJf "$tmp_archive" -C "$tmp_dir" ||
     { rm -rf "$tmp_dir"; die "Failed to extract NaiveProxy release archive."; }
 
-  caddy_binary="$(find "$tmp_dir" -type f -name caddy | head -1)"
+  caddy_binary="$(find "$tmp_dir" -type f -name naive | head -1)"
   if [[ -z "$caddy_binary" ]]; then
     rm -rf "$tmp_dir"
     die "NaiveProxy archive did not contain a 'caddy' binary."
