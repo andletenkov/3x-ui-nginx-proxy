@@ -322,12 +322,18 @@ xui_sync_inbound_remark() {
 
   id="$(python3 -c "
 import json,sys
+tag = sys.argv[2]
 try:
     inbounds = json.loads(sys.argv[1]).get('obj') or []
 except Exception:
     sys.exit(1)
+# Extract port from tag format 'in-<port>-<proto>'
+try:
+    tag_port = int(tag.split('-')[1])
+except (IndexError, ValueError):
+    tag_port = None
 for inbound in inbounds:
-    if inbound.get('tag') == sys.argv[2]:
+    if inbound.get('tag') == tag or (tag_port and inbound.get('port') == tag_port):
         if inbound.get('remark') == sys.argv[3]:
             sys.exit(2)
         print(inbound['id'])
