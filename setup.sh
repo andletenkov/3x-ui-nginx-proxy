@@ -1874,6 +1874,17 @@ print_client_links() {
   if [[ -n "$REALITY_SUBDOMAIN" ]]; then
     echo "vless://${CLIENT_UUID}@${REALITY_SUBDOMAIN}.${BASE_DOMAIN}:443?type=tcp&security=reality&pbk=${REALITY_PUBLIC_KEY}&fp=chrome&sni=${REALITY_DEST}&sid=${REALITY_SHORT_ID}&flow=xtls-rprx-vision#${INBOUND_REMARK_REALITY}"
   fi
+
+  if [[ -n "$NAIVE_SUBDOMAIN" ]]; then
+    echo
+    echo "=== NaiveProxy (HTTPS forward proxy, not a VLESS client) ==="
+    echo "  Server: ${NAIVE_SUBDOMAIN}.${BASE_DOMAIN}"
+    echo "  Port:   443"
+    echo "  Username: ${NAIVE_USERNAME}"
+    echo "  Password: ${NAIVE_PASSWORD}"
+    echo "  Client config (Caddy/naiveproxy-compatible client):"
+    echo "    https://${NAIVE_USERNAME}:${NAIVE_PASSWORD}@${NAIVE_SUBDOMAIN}.${BASE_DOMAIN}"
+  fi
 }
 
 verify_deployment() {
@@ -1886,7 +1897,11 @@ verify_deployment() {
   echo
   echo "Checking local listeners..."
 
-  for check in "Panel:$PANEL_PORT" "Subscription:$SUB_PORT" "WebSocket:$WS_PORT" "gRPC:$GRPC_PORT" "XHTTP:$XHTTP_PORT"; do
+  local listener_checks=("Panel:$PANEL_PORT" "Subscription:$SUB_PORT" "WebSocket:$WS_PORT" "gRPC:$GRPC_PORT" "XHTTP:$XHTTP_PORT")
+  [[ -z "$REALITY_SUBDOMAIN" ]] || listener_checks+=("Reality:$REALITY_PORT")
+  [[ -z "$NAIVE_SUBDOMAIN" ]] || listener_checks+=("NaiveProxy:$NAIVE_PORT")
+
+  for check in "${listener_checks[@]}"; do
     local check_name="${check%%:*}"
     local check_port="${check#*:}"
 
@@ -1921,6 +1936,25 @@ verify_deployment() {
       echo "  [FAIL] Could not complete a TLS handshake to https://${vless_domain}/"
       all_ok=false
     fi
+
+    if [[ -n "$NAIVE_SUBDOMAIN" ]]; then
+      local naive_domain="${NAIVE_SUBDOMAIN}.${BASE_DOMAIN}"
+      local naive_status
+      naive_status="$(curl -sk -o /dev/null -w '%{http_code}' --max-time 10 "https://${naive_domain}/" || echo "000")"
+
+      if [[ "$naive_status" =~ ^(2|3)[0-9][0-9]$ ]]; then
+        echo "  [OK]   https://${naive_domain}/ responded with HTTP ${naive_status} (decoy content, as expected for an unauthenticated request)"
+      else
+        echo "  [FAIL] https://${naive_domain}/ responded with HTTP ${naive_status} (or was unreachable)"
+        all_ok=false
+      fi
+    fi
+
+    # Reality's own SNI (the donor site) isn't reachable through a plain
+    # curl request the way the checks above are -- a real client presenting
+    # the correct SNI/Reality handshake is the only meaningful test. Its
+    # local listener above is the extent of what's checked automatically
+    # here; verify Reality manually with a real client after setup.
   else
     echo "  [SKIP] curl not available for HTTPS checks."
   fi

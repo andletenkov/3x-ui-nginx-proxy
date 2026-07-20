@@ -994,6 +994,128 @@ cf_real_ip_env() {
   [[ "$output" == *"vless://11111111-2222-3333-4444-555555555555@reality.example.com:443?type=tcp&security=reality&pbk=reality-pub-stub&fp=chrome&sni=github.com&sid=abcd1234&flow=xtls-rprx-vision#reality-remark"* ]]
 }
 
+@test "print_client_links prints NaiveProxy connection info when enabled" {
+  CLIENT_UUID="11111111-2222-3333-4444-555555555555"
+  WS_PATH="/api/v1/events"
+  GRPC_SERVICE="api.v1.SyncService"
+  XHTTP_PATH="/api/v1/ingest/abcd1234"
+  INBOUND_REMARK_WS="ws-cdn"
+  INBOUND_REMARK_GRPC="grpc-cdn"
+  INBOUND_REMARK_XHTTP="xhttp-cdn"
+  VLESS_SUBDOMAIN="vpn"
+  BASE_DOMAIN="example.com"
+  XUI_USERNAME="u"
+  XUI_PASSWORD="p"
+  PANEL_SUBDOMAIN="admin"
+  PANEL_PATH="/admin"
+  VLESS_ENCRYPTION_CLIENT_KEY="mlkem768-client-stub"
+  REALITY_SUBDOMAIN=""
+  NAIVE_SUBDOMAIN="naive"
+  NAIVE_USERNAME="user_abcd1234"
+  NAIVE_PASSWORD="supersecretpassword"
+
+  run print_client_links
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"=== NaiveProxy (HTTPS forward proxy, not a VLESS client) ==="* ]]
+  [[ "$output" == *"Server: naive.example.com"* ]]
+  [[ "$output" == *"Username: user_abcd1234"* ]]
+  [[ "$output" == *"Password: supersecretpassword"* ]]
+  [[ "$output" == *"https://user_abcd1234:supersecretpassword@naive.example.com"* ]]
+}
+
+@test "print_client_links omits the NaiveProxy section when disabled" {
+  CLIENT_UUID="11111111-2222-3333-4444-555555555555"
+  WS_PATH="/api/v1/events"
+  GRPC_SERVICE="api.v1.SyncService"
+  XHTTP_PATH="/api/v1/ingest/abcd1234"
+  INBOUND_REMARK_WS="ws-cdn"
+  INBOUND_REMARK_GRPC="grpc-cdn"
+  INBOUND_REMARK_XHTTP="xhttp-cdn"
+  VLESS_SUBDOMAIN="vpn"
+  BASE_DOMAIN="example.com"
+  XUI_USERNAME="u"
+  XUI_PASSWORD="p"
+  PANEL_SUBDOMAIN="admin"
+  PANEL_PATH="/admin"
+  VLESS_ENCRYPTION_CLIENT_KEY="mlkem768-client-stub"
+  REALITY_SUBDOMAIN=""
+  NAIVE_SUBDOMAIN=""
+
+  run print_client_links
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"NaiveProxy"* ]]
+}
+
+# ---------------------------------------------------------------------------
+# verify_deployment
+# ---------------------------------------------------------------------------
+
+verify_deployment_env() {
+  PANEL_SUBDOMAIN="admin"
+  VLESS_SUBDOMAIN="vpn"
+  BASE_DOMAIN="example.com"
+  PANEL_PATH="/admin"
+  PANEL_PORT="2053"
+  SUB_PORT="2096"
+  WS_PORT="10001"
+  GRPC_PORT="10002"
+  XHTTP_PORT="10003"
+  REALITY_SUBDOMAIN=""
+  NAIVE_SUBDOMAIN=""
+}
+
+@test "verify_deployment checks the Reality and NaiveProxy local listeners when enabled" {
+  verify_deployment_env
+  REALITY_SUBDOMAIN="reality"
+  REALITY_PORT="20000"
+  NAIVE_SUBDOMAIN="naive"
+  NAIVE_PORT="21000"
+  export SS_LISTENING_PORTS="2053 2096 10001 10002 10003 20000 21000"
+  export CURL_HTTP_CODE="200"
+
+  run verify_deployment
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"[OK]   Reality is listening on 127.0.0.1:20000"* ]]
+  [[ "$output" == *"[OK]   NaiveProxy is listening on 127.0.0.1:21000"* ]]
+  [[ "$output" == *"All checks passed."* ]]
+}
+
+@test "verify_deployment reports a failing Reality listener" {
+  verify_deployment_env
+  REALITY_SUBDOMAIN="reality"
+  REALITY_PORT="20000"
+  export SS_LISTENING_PORTS="2053 2096 10001 10002 10003"
+  export CURL_HTTP_CODE="200"
+
+  run verify_deployment
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"[FAIL] Reality is NOT listening on 127.0.0.1:20000"* ]]
+  [[ "$output" != *"All checks passed."* ]]
+}
+
+@test "verify_deployment omits Reality/NaiveProxy listener checks when both disabled" {
+  verify_deployment_env
+  export SS_LISTENING_PORTS="2053 2096 10001 10002 10003"
+  export CURL_HTTP_CODE="200"
+
+  run verify_deployment
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"Reality is"* ]]
+  [[ "$output" != *"NaiveProxy is"* ]]
+}
+
+@test "verify_deployment checks the NaiveProxy public HTTPS endpoint when enabled" {
+  verify_deployment_env
+  NAIVE_SUBDOMAIN="naive"
+  NAIVE_PORT="21000"
+  export SS_LISTENING_PORTS="2053 2096 10001 10002 10003 21000"
+  export CURL_HTTP_CODE="200"
+
+  run verify_deployment
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"[OK]   https://naive.example.com/ responded with HTTP 200"* ]]
+}
+
 # ---------------------------------------------------------------------------
 # print_summary
 # ---------------------------------------------------------------------------
