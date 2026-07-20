@@ -1166,6 +1166,7 @@ write_nginx_stream_config() {
   local panel_domain="${PANEL_SUBDOMAIN}.${BASE_DOMAIN}"
   local vless_domain="${VLESS_SUBDOMAIN}.${BASE_DOMAIN}"
   local naive_domain="${NAIVE_SUBDOMAIN:+${NAIVE_SUBDOMAIN}.${BASE_DOMAIN}}"
+  local reality_domain="${REALITY_SUBDOMAIN:+${REALITY_SUBDOMAIN}.${BASE_DOMAIN}}"
 
   local tmp_stream
   tmp_stream="$(make_tmp_file)"
@@ -1175,7 +1176,7 @@ write_nginx_stream_config() {
     echo "    ${panel_domain}    cdn;"
     echo "    ${vless_domain}    cdn;"
     [[ -z "$naive_domain" ]] || echo "    ${naive_domain}    naive;"
-    [[ -z "$REALITY_SUBDOMAIN" ]] || echo "    ${REALITY_DEST}    reality;"
+    [[ -z "$REALITY_SUBDOMAIN" ]] || echo "    ${reality_domain}    reality;"
     echo "    default    decoy;"
     echo "}"
     echo
