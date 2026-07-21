@@ -644,7 +644,7 @@ ensure_reality_inbound() {
   # and has no CDN/reverse-proxy TLS termination in front of it.
   local stream_settings
   export REALITY_DEST_ARG="$REALITY_DEST" REALITY_SHORT_ID_ARG="$REALITY_SHORT_ID" \
-    REALITY_PRIVATE_KEY_ARG="$REALITY_PRIVATE_KEY"
+    REALITY_PRIVATE_KEY_ARG="$REALITY_PRIVATE_KEY" REALITY_PUBLIC_KEY_ARG="$REALITY_PUBLIC_KEY"
   stream_settings="$(python3 << 'REALITYEOF'
 import json,os
 settings = {
@@ -657,6 +657,15 @@ settings = {
         'serverNames': [os.environ['REALITY_DEST_ARG']],
         'privateKey': os.environ['REALITY_PRIVATE_KEY_ARG'],
         'shortIds': [os.environ['REALITY_SHORT_ID_ARG']],
+        # The 3x-ui panel UI and subscription link generator (applyShareRealityParams)
+        # read the public key from this NESTED settings.publicKey field, not from
+        # a top-level key -- omitting it leaves the panel showing only the private
+        # key and produces subscription links silently missing pbk=.
+        'settings': {
+            'publicKey': os.environ['REALITY_PUBLIC_KEY_ARG'],
+            'fingerprint': 'chrome',
+            'spiderX': '/',
+        },
     },
 }
 print(json.dumps(settings))
