@@ -918,7 +918,10 @@ write_caddyfile() {
         exclude http.log.error
     }
 }
-127.0.0.1:${NAIVE_PORT} {
+:${NAIVE_PORT}, ${NAIVE_SUBDOMAIN}.${BASE_DOMAIN} {
+    # Match NaiveProxy's `:443, example.com` configuration while keeping the
+    # listener private.
+    bind 127.0.0.1
     tls ${CERT_DIR}/fullchain.pem ${CERT_DIR}/privkey.pem
     encode
     forward_proxy {
