@@ -1893,7 +1893,7 @@ caddy_env() {
   [ "$status" -eq 0 ]
 
   grep -q "order forward_proxy before file_server" "$CADDYFILE"
-  grep -q ":21000, naive.example.com {" "$CADDYFILE"
+  grep -q ":21000, naive.example.com:21000 {" "$CADDYFILE"
   grep -q "bind 127.0.0.1" "$CADDYFILE"
   grep -q "tls /tmp/fake-cert/fullchain.pem /tmp/fake-cert/privkey.pem" "$CADDYFILE"
   grep -q "basic_auth user_abcd1234 supersecretpassword" "$CADDYFILE"

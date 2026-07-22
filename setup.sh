@@ -918,9 +918,9 @@ write_caddyfile() {
         exclude http.log.error
     }
 }
-:${NAIVE_PORT}, ${NAIVE_SUBDOMAIN}.${BASE_DOMAIN} {
-    # Match NaiveProxy's `:443, example.com` configuration while keeping the
-    # listener private.
+:${NAIVE_PORT}, ${NAIVE_SUBDOMAIN}.${BASE_DOMAIN}:${NAIVE_PORT} {
+    # Keep both Caddy addresses on the internal listener port; the hostname
+    # identifies the proxy without making Caddy bind public port 443.
     bind 127.0.0.1
     tls ${CERT_DIR}/fullchain.pem ${CERT_DIR}/privkey.pem
     encode
