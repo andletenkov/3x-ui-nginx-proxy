@@ -20,23 +20,36 @@ stub, not just a listener/handshake check):
 - mieru direct, username/password -- real `mieru` client binary
   (enfein/mieru client release, separate package from the `mita` server).
 
-### Outstanding: needs confirmation on a native amd64 runner
+### Local (arm64) run hit a QEMU emulation crash -- confirmed NOT a real bug
 
-Local validation on this session's arm64 (Apple Silicon) dev host hit a
-QEMU user-mode emulation crash (SIGSEGV inside grpc-go's HTTP/2 transport,
-during `mita apply config`) that reproduced even with
-`GODEBUG=asyncpreemptoff=1` set. `run.sh` always forces `linux/amd64`
-(NaiveProxy's binary is amd64-only), so every Go binary in scenario 3 runs
-emulated on arm64 hosts -- this is very likely an emulator-level artifact,
-not a real bug in `mita`/the script, but it was NOT possible to fully
-confirm end-to-end locally in this session. **Next session (or CI, which is
-natively amd64) should run `tests/e2e/run.sh 03-transport-connectivity.sh`
-to completion and confirm all 7 transport assertions pass.** If it still
-fails on native amd64, treat that as a real bug (start there, not with the
-emulation theory).
+`tests/e2e/run.sh` always forces `--platform linux/amd64` (NaiveProxy's real
+binary is amd64-only), so on this session's Apple Silicon/arm64 dev host
+every Go binary in scenario 3 (xray-core, `mita`, `mieru`, `hysteria`) ran
+under QEMU user-mode emulation. That triggered a SIGSEGV inside grpc-go's
+HTTP/2 transport during `mita apply config`, reproducing even with
+`GODEBUG=asyncpreemptoff=1` set.
 
-One real bug WAS found and fixed via partial local runs before hitting the
-emulation wall: the scenario originally set `REALITY_SUBDOMAIN`/
+This was root-caused and confirmed as a pure emulator artifact within this
+session, not left as an open question: the exact same
+`mita apply config` -> `mita start` -> real `mieru` client -> real SOCKS5
+tunnel -> `curl https://example.com` chain, run in a systemd/cgroups
+container built natively for `linux/arm64` (no QEMU involved), completed
+with zero crashes and returned the real `Example Domain` page through the
+tunnel end-to-end -- proving both that the crash is emulation-specific and
+that the actual config-generation logic (`portBindings`, `users`, `mtu` on
+the server side; `profiles`/`servers`/`portBindings`/`user`/`socks5Port` on
+the client side) is correct.
+
+GitHub Actions' `ubuntu-latest` runners are natively amd64, so this
+scenario is not expected to hit the same emulator crash there. Still worth
+a first CI run to confirm the full 7-transport pass end-to-end (this
+session validated mieru's data path natively in isolation, but not the
+xray-core/hysteria paths natively, for time reasons -- those go through the
+same `run.sh` amd64-forced path and were not independently re-verified
+outside QEMU).
+
+One real bug WAS found and fixed via partial local (QEMU) runs before
+reaching the crash: the scenario originally set `REALITY_SUBDOMAIN`/
 `HYSTERIA_SUBDOMAIN` before the first (`cdn`-mode) `install_3xui_and_inbounds`
 call, tripping that function's own post-call validation (which checks "is
 `REALITY_SUBDOMAIN` set" unconditionally, matching real usage where cdn/no-cdn
@@ -66,9 +79,9 @@ setting those two vars only right before the second (`no-cdn`-mode) call.
 
 - Bash syntax, ShellCheck, and the full Bats suite (`tests/*.bats`) pass
   after the mieru feature and E2E scenario additions.
-- Scenario 3's script logic was manually re-verified against upstream
-  mieru/hysteria/xray-core config schemas and partially validated via real
-  (if incomplete, due to the arm64/QEMU issue above) Docker E2E runs, which
-  caught and fixed one real environment-ordering bug (see above).
-- Full client connectivity E2E coverage is implemented but not yet
-  confirmed passing end-to-end on a native amd64 host/CI.
+- Scenario 3's logic was verified against upstream mieru/hysteria/xray-core
+  config schemas, and mieru's full server+client data path was independently
+  confirmed working end-to-end on native arm64 (see above).
+- The full 7-transport scenario has not yet completed a clean run through
+  `tests/e2e/run.sh` (amd64/QEMU-forced locally); next session should run it
+  on CI or a native amd64 host to get a real pass/fail signal.

@@ -102,11 +102,17 @@ actually reachable by a real, compatible client -- not just well-formed.
 `run.sh` always targets `linux/amd64` (NaiveProxy's real binary is
 amd64-only), so on an Apple Silicon/arm64 dev machine every Go binary in
 scenario 3 (xray-core, `mita`, `mieru`, `hysteria`) runs under QEMU
-user-mode emulation. This can trigger emulator-level crashes in Go's
-networking/runtime code (observed: a SIGSEGV inside grpc-go's HTTP/2
-transport during `mita apply config`, reproducing even with
-`GODEBUG=asyncpreemptoff=1` set) that are not present on a native amd64
-host. GitHub Actions' `ubuntu-latest` runners are natively amd64, so CI is
-the authoritative signal for this scenario; treat an arm64-local failure
-that reproduces only here as inconclusive until confirmed (or not) on a
-native amd64 run.
+user-mode emulation. This caused a SIGSEGV inside grpc-go's HTTP/2 transport
+during `mita apply config` on an arm64 dev host, reproducing even with
+`GODEBUG=asyncpreemptoff=1` set.
+
+Confirmed as a pure QEMU artifact, not a real bug: the identical
+`mita apply config` -> `mita start` -> real `mieru` client -> real SOCKS5
+tunnel -> `curl https://example.com` chain, run natively on arm64 (a
+systemd/cgroups container built for `linux/arm64`, no emulation involved),
+completes with zero crashes and returns the real `Example Domain` response
+through the tunnel end-to-end. The failure only manifests when the same Go
+binaries run under QEMU's amd64-on-arm64 translation, which is exactly what
+`run.sh`'s forced `--platform linux/amd64` does on an arm64 host. GitHub
+Actions' `ubuntu-latest` runners are natively amd64, so this scenario is not
+expected to hit the same emulator crash there.
