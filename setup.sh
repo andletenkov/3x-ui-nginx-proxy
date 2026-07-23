@@ -1311,12 +1311,22 @@ EOF
   mv "$tmp_config" "$MITA_CONFIG_FILE"
   chmod 600 "$MITA_CONFIG_FILE"
 
+  # systemctl only manages the always-on mita control daemon (auto-started/
+  # enabled by the deb package itself) -- it does NOT toggle the proxy
+  # listener. That is a separate, persistent on/off state controlled by
+  # `mita start`/`mita stop`, which `mita apply config` alone does not
+  # change. Stop first (harmless if not yet started) so a rerun with new
+  # settings takes effect instead of silently keeping the old config live.
+  systemctl enable mita >/dev/null 2>&1 || true
+  systemctl is-active --quiet mita || systemctl start mita ||
+    die "Failed to start the mita control daemon; check 'systemctl status mita' and 'journalctl -u mita'."
+
   mita apply config "$MITA_CONFIG_FILE" ||
     die "Failed to apply mieru (mita) server configuration; check ${MITA_CONFIG_FILE}."
 
-  systemctl enable mita >/dev/null 2>&1 || true
-  systemctl restart mita ||
-    die "Failed to start the mita (mieru) service; check 'systemctl status mita' and 'journalctl -u mita'."
+  mita stop >/dev/null 2>&1 || true
+  mita start ||
+    die "Failed to start the mieru proxy listener ('mita start'); check 'mita describe config' and 'journalctl -u mita'."
 }
 
 write_cloudflare_credentials() {
