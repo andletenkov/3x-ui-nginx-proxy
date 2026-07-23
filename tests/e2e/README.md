@@ -73,10 +73,40 @@ two places:
 
 ## Scenarios
 
-- `01-xui-reality.sh` — real 3x-ui panel + `setup.sh`'s 3x-ui install/
-  inbound functions: inbound creation, VLESS Encryption keys, Reality keys/
-  Host override, subscription output.
+- `01-xui-reality.sh` — real 3x-ui `INSTALL_MODE=no-cdn` flow: Reality keys,
+  Host override, subscription output, and proof that no WS/gRPC/XHTTP inbound
+  was created.
 
-- `02-nginx-caddy.sh` — real nginx (nginx.org repo) + real Caddy
-  (`klzgrad/forwardproxy`) + `setup.sh`'s config-writing functions: config
-  validation, service startup, port binding, SNI-based routing.
+- `02-nginx-caddy.sh` — real nginx (nginx.org repo): validates the
+  `INSTALL_MODE=cdn` listener and VLESS TLS handshake, then renders the
+  `no-cdn` flow and proves its Nginx site has no CDN VLESS proxy locations.
+
+- `03-transport-connectivity.sh` — real client-to-upstream connectivity for
+  every transport: starts an actual client (the same xray-core binary 3x-ui
+  installs, the real `hysteria` client, the real `mieru` client, plain curl
+  for NaiveProxy) and asserts on the real response fetched *through* each
+  tunnel from `https://example.com`. This is the tier scenarios 1-2
+  deliberately don't cover: API payloads, generated config, listeners, and
+  TLS handshakes are necessary but not sufficient proof a client can
+  actually push a byte through and get a real answer back. Covers VLESS
+  WebSocket/gRPC/XHTTP through Nginx, VLESS+Reality direct, Hysteria2 direct
+  (including Salamander/`finalmask`), NaiveProxy's HTTPS forward proxy, and
+  mieru direct.
+
+Together these scenarios enforce that the two installation flows never create
+mixed CDN and direct inbounds, and that every configured transport is
+actually reachable by a real, compatible client -- not just well-formed.
+
+### Known local-only caveat: QEMU emulation on arm64 dev hosts
+
+`run.sh` always targets `linux/amd64` (NaiveProxy's real binary is
+amd64-only), so on an Apple Silicon/arm64 dev machine every Go binary in
+scenario 3 (xray-core, `mita`, `mieru`, `hysteria`) runs under QEMU
+user-mode emulation. This can trigger emulator-level crashes in Go's
+networking/runtime code (observed: a SIGSEGV inside grpc-go's HTTP/2
+transport during `mita apply config`, reproducing even with
+`GODEBUG=asyncpreemptoff=1` set) that are not present on a native amd64
+host. GitHub Actions' `ubuntu-latest` runners are natively amd64, so CI is
+the authoritative signal for this scenario; treat an arm64-local failure
+that reproduces only here as inconclusive until confirmed (or not) on a
+native amd64 run.
