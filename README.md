@@ -7,12 +7,11 @@
 ![Tests](https://github.com/andletenkov/3x-ui-cf-setup/actions/workflows/tests.yml/badge.svg)
 ![License](https://img.shields.io/github/license/andletenkov/3x-ui-cf-setup)
 
-Automated deployment of a Cloudflare-fronted 3x-ui/Xray server, with optional
-direct-connection transports for when a CDN alone isn't enough. It installs
-and configures 3x-ui, Nginx, wildcard TLS, UFW, Cloudflare origin protection,
-VLESS transports (WS/gRPC/XHTTP with VLESS Encryption + XTLS-Vision),
-subscriptions, routing, optional VLESS+Reality, optional NaiveProxy, and
-optional host hardening.
+Automated deployment of a 3x-ui/Xray server in one of two **mutually exclusive**
+network modes. It installs and configures 3x-ui, Nginx, wildcard TLS, UFW,
+subscriptions, routing, and optional host hardening. The mode boundary prevents
+CDN-fronted and direct transports from sharing a VPS, which could otherwise
+make the CDN origin's IP discoverable and weaken its camouflage.
 
 ## What it sets up
 
@@ -27,6 +26,7 @@ flowchart LR
       Stream --> NginxHTTP[Nginx HTTP loopback]
       Stream -.optional.-> Caddy[NaiveProxy / Caddy]
       Stream -.optional.-> XrayReality[Xray VLESS+Reality]
+      Client -.direct, optional.-> Mieru[mieru / mita]
       Stream -.unmatched SNI.-> Decoy[Decoy vhost]
       NginxHTTP --> Panel[3x-ui panel]
       NginxHTTP --> WS[VLESS WebSocket]
@@ -35,9 +35,10 @@ flowchart LR
     end
 ```
 
-When neither Reality nor NaiveProxy is enabled, the stream SNI Guard doesn't
-exist at all and Nginx binds 443 directly, exactly as in the CDN-only setup.
-It only appears once a direct-connection feature needs to share port 443.
+This diagram shows the two alternatives, not a combined deployment. In `cdn`
+mode only the Cloudflare → Nginx → WS/gRPC/XHTTP branch is created. In
+`no-cdn` mode only the direct Reality/Naive branches (plus panel/subscription)
+are created; the stream SNI Guard appears when direct traffic shares port 443.
 
 | Component | Configuration |
 |---|---|
@@ -45,8 +46,9 @@ It only appears once a direct-connection feature needs to share port 443.
 | VLESS/WS | Loopback Xray listener proxied through Nginx HTTPS, VLESS Encryption (ML-KEM-768) |
 | VLESS/gRPC | Loopback Xray listener proxied through Nginx HTTP/2, VLESS Encryption (ML-KEM-768) |
 | VLESS/XHTTP | Loopback Xray listener using `packet-up`, proxied with Nginx `grpc_pass`, VLESS Encryption + XTLS-Vision |
-| VLESS/Reality *(optional)* | Direct connection (no CDN), donor-site impersonation, no VLESS Encryption needed (no MITM-capable proxy in front) |
-| NaiveProxy *(optional)* | Direct connection (no CDN), Caddy + forwardproxy, reuses the same wildcard cert |
+| VLESS/Reality *(`no-cdn`)* | Direct connection, donor-site impersonation, no VLESS Encryption needed |
+| NaiveProxy *(`no-cdn`)* | Direct connection, Caddy + forwardproxy, reuses the wildcard cert |
+| mieru *(`no-cdn`)* | Direct connection, mita server, own username/password auth, no TLS/SNI/cert |
 | Subscription | Loopback listener proxied through the panel hostname |
 | TLS | Let's Encrypt wildcard certificate via Cloudflare DNS-01, shared by the CDN inbounds and NaiveProxy |
 | Origin firewall | TCP/443 open to everyone -- direct-connection features (Reality, NaiveProxy) need it; the stream SNI Guard, not the firewall, is what keeps random probes off the real inbounds |
@@ -66,15 +68,13 @@ Use `setup.sh` for normal operation. `harden-host.sh` can be run directly only f
 - Debian or Ubuntu VPS; run as `root`.
 - Domain hosted by Cloudflare.
 - Cloudflare API token with `Zone:DNS:Edit` permission.
-- The panel and VLESS (WS/gRPC/XHTTP) hostnames must remain **orange-cloud proxied**.
-- The optional Reality and NaiveProxy hostnames must be **DNS-only (grey cloud)** --
-  they are direct connections to the VPS and cannot go through Cloudflare's proxy
-  at all (Cloudflare would terminate their TLS, breaking Reality entirely and
-  defeating NaiveProxy's point).
-- TCP/443 is open to the whole internet, not just Cloudflare -- direct-
-  connection hostnames need it, so there is no source-IP restriction on it
-  any more. What keeps unmatched traffic off the real inbounds is the Nginx
-  stream SNI Guard's decoy branch, not the firewall.
+- Choose **one** mode before installing; never place CDN and direct transports
+  on the same VPS with this installer.
+- In `cdn` mode, the panel and VLESS hostname must remain **orange-cloud proxied**.
+- In `no-cdn` mode, Reality and NaiveProxy hostnames must be **DNS-only (grey
+  cloud)**. They connect directly to the VPS and cannot pass through Cloudflare.
+- TCP/443 is open to the internet. In `no-cdn` mode the Nginx stream SNI Guard
+  routes direct traffic by SNI and sends unmatched SNI to a decoy.
 
 ## Install
 
@@ -85,10 +85,32 @@ chmod +x setup.sh harden-host.sh
 sudo ./setup.sh
 ```
 
+The setup first requires a CDN choice. Set `CDN_MODE=true` (or `yes`, `1`,
+`on`) for CDN inbounds, or `CDN_MODE=false` (or `no`, `0`, `off`) for direct
+inbounds; it can also be chosen interactively. The choice is persisted in
+`/etc/nginx/.3xui-proxy.conf` and validated on every
+run. 3x-ui creates panel credentials and its secret panel path itself.
+
+### Installation modes
+
+| `CDN_MODE` | Created inbounds | DNS/proxy requirement |
+|---|---|---|
+| true-compatible | VLESS WebSocket, gRPC, XHTTP/TLS | VLESS hostname is orange-cloud proxied; no Reality or NaiveProxy is allowed |
+| false-compatible | Hysteria2, VLESS TCP+Reality, and/or NaiveProxy | Direct hostnames are DNS-only; at least one direct inbound is required |
+
+`xhttp-reality` is reserved for a future `no-cdn` release. Hysteria2 is a
+native direct UDP/QUIC inbound and is created when its subdomain is supplied. A `cdn` run clears any saved Reality/Naive settings, so
+switching modes is deliberate and cannot leave mixed inbounds behind.
+
+Examples:
+
+```bash
+sudo CDN_MODE=true ./setup.sh
+sudo CDN_MODE=false ./setup.sh
+```
+
 The setup asks for the base domain, panel/VLESS subdomains, email, and internal
-ports. It generates unique paths and ports when no saved values exist. 3x-ui
-creates the panel credentials and secret panel path itself; the resulting
-credentials and VLESS links are printed at completion.
+ports. It generates unique paths and ports when no saved values exist.
 
 New VLESS clients are explicitly enabled by default.
 
@@ -105,7 +127,7 @@ The page is copied to `/etc/nginx/3xui-proxy-fallback.html`. Only `/` serves
 the page; unmatched paths still return `404`. Run without `FALLBACK_HTML_PATH`
 to remove the installed fallback page and restore `404` at `/`.
 
-### XHTTP through Cloudflare
+### `cdn`: XHTTP through Cloudflare
 
 The generated XHTTP inbound uses:
 
@@ -126,7 +148,7 @@ In Cloudflare, enable **Network → gRPC** for the zone. Keep the VLESS hostname
 orange-cloud proxied. Import the XHTTP URI generated by the panel or setup
 output; it must use the same path and `mode=packet-up`.
 
-### VLESS Encryption and XTLS-Vision
+### `cdn`: VLESS Encryption and XTLS-Vision
 
 WS/gRPC/XHTTP inbounds generate an ML-KEM-768 keypair the first time
 `setup.sh` runs and reuse it on every rerun. It's applied independently of
@@ -137,9 +159,24 @@ transport (Vision otherwise only works over raw TCP). Reality does not use
 VLESS Encryption -- there's no CDN/reverse-proxy TLS termination in front of
 it to protect against in the first place.
 
-### Optional: VLESS+Reality (direct connection, no CDN)
+### `no-cdn`: Hysteria2
 
-Leave the prompt blank to skip this feature entirely. If enabled, you provide:
+Supply a DNS-only Hysteria2 subdomain to create a direct UDP/QUIC inbound. It
+listens on UDP/443 by default (TCP/443 remains available to Nginx) and uses
+`/etc/letsencrypt/live/<base-domain>/fullchain.pem` and `privkey.pem`: the same
+wildcard certificate already issued for `*.BASE_DOMAIN`. Use the exact
+Hysteria2 hostname as client SNI, for example `hy2.example.com`; it is covered
+by the wildcard certificate and must resolve directly to the VPS. The generated
+Hysteria2 authentication and Salamander-obfuscation values are printed at
+completion. Salamander intentionally makes this endpoint incompatible with
+normal HTTP/3 masquerading; do not configure a Hysteria `masquerade` fallback
+on this inbound.
+
+### `no-cdn`: VLESS+Reality
+
+Available only when `INSTALL_MODE=no-cdn`. Leave its prompt blank only if you
+instead enable NaiveProxy; `no-cdn` requires at least one direct inbound. If
+enabled, you provide:
 
 - a **DNS-only** subdomain (its A/AAAA record must point directly at the VPS,
   proxy status off), and
@@ -152,9 +189,31 @@ The inbound shares port 443 with everything else via the Nginx stream SNI
 Guard, dispatching by the TLS ClientHello's SNI before any TLS termination
 happens -- Reality's own TLS session is untouched end-to-end.
 
-### Optional: NaiveProxy (direct connection, no CDN)
+### `no-cdn`: mieru (direct connection)
 
-Also disabled by default (blank subdomain = skipped). If enabled, `setup.sh`
+Available only when `INSTALL_MODE=no-cdn`; it may be used alone or alongside
+Reality/NaiveProxy/Hysteria2. If enabled, `setup.sh` downloads the latest
+[enfein/mieru](https://github.com/enfein/mieru) `mita` server Debian package,
+generates a username/password, and applies a server configuration via
+`mita apply config` (installed as the `mita` systemd service). See the
+upstream [server installation guide](https://github.com/enfein/mieru/blob/main/docs/server-install.md).
+
+Unlike Reality and NaiveProxy, mieru has no TLS/SNI layer at all -- there is
+no certificate to issue and nothing for the Nginx stream SNI Guard to route,
+so it gets its own dedicated public port (TCP or UDP, chosen at setup time,
+default UDP) rather than sharing 443. Its subdomain is a DNS-only record used
+solely as a friendly hostname for clients; mieru authenticates purely via the
+generated username/password, not the hostname itself. Mind the mieru project's
+own [security guide](https://github.com/enfein/mieru/blob/main/docs/security.md)
+(e.g. avoiding domestic OSes/browsers) and
+[maintenance guide](https://github.com/enfein/mieru/blob/main/docs/operation.md#maintenance--troubleshooting)
+for day-2 operations (`mita get users`, `mita describe config`, log locations,
+BBR/MTU troubleshooting).
+
+### `no-cdn`: NaiveProxy (direct connection)
+
+Available only when `INSTALL_MODE=no-cdn`; it may be used alone or alongside
+Reality. If enabled, `setup.sh`
 downloads the latest [klzgrad/naiveproxy](https://github.com/klzgrad/naiveproxy)
 release (a Caddy build bundling the naive fork of `forwardproxy`), generates a
 username/password, and runs it as a systemd service. Caddy binds loopback
@@ -171,6 +230,7 @@ credentials sees an ordinary decoy webpage (the same content as
 
 | Variable | Default / source | Notes |
 |---|---|---|
+| `CDN_MODE` | prompted; true/false-compatible | **Required.** Selects mutually exclusive CDN or direct transport flow |
 | `BASE_DOMAIN` | prompted | Required base domain |
 | `PANEL_SUBDOMAIN` | `admin` | Must differ from `VLESS_SUBDOMAIN` |
 | `VLESS_SUBDOMAIN` | `vpn` | Cloudflare-proxied VLESS hostname |
@@ -187,6 +247,14 @@ credentials sees an ordinary decoy webpage (the same content as
 | `REALITY_DEST` | prompted if Reality enabled | Real, unrelated donor site to impersonate (e.g. `github.com`); never a domain of `BASE_DOMAIN` |
 | `REALITY_PORT`, `REALITY_SHORT_ID`, `REALITY_PRIVATE_KEY`, `REALITY_PUBLIC_KEY` | generated once | Saved and reused on subsequent runs |
 | `NAIVE_SUBDOMAIN` | blank (disabled) | Optional; must be **DNS-only**, not orange-cloud |
+| `HYSTERIA_SUBDOMAIN` | blank (disabled) | Optional Hysteria2 hostname; must be **DNS-only** |
+| `MIERU_SUBDOMAIN` | blank (disabled) | Optional mieru hostname; must be **DNS-only**; used only as a client-facing label, not for routing |
+| `MIERU_PORT` | random free port | Public TCP or UDP port; not shared with 443 |
+| `MIERU_PROTOCOL` | `UDP` | `TCP` or `UDP`, per mieru's [protocol guide](https://github.com/enfein/mieru/blob/main/docs/protocol.md) |
+| `MIERU_USERNAME`, `MIERU_PASSWORD` | generated once | Saved and reused on subsequent runs |
+| `HYSTERIA_PORT` | `443`/UDP | Public UDP listener; shares the number, not the protocol, with Nginx TCP/443 |
+| `HYSTERIA_AUTH` | generated once | Hysteria2 client authentication secret |
+| `HYSTERIA_OBFS_PASSWORD` | generated once | Salamander UDP obfuscation password; must match the client |
 | `NAIVE_PORT`, `NAIVE_USERNAME`, `NAIVE_PASSWORD` | generated once | Saved and reused on subsequent runs |
 | `NGINX_CDN_PORT`, `NGINX_DECOY_PORT` | random free port | Only reserved when Reality or NaiveProxy is enabled |
 
@@ -225,8 +293,9 @@ sudo ./setup.sh --uninstall
 This removes the Nginx site, the stream SNI Guard config (and its `nginx.conf`
 include), Cloudflare real-IP configuration, UFW rules, Certbot hook,
 Cloudflare token, saved state, 3x-ui, NaiveProxy (service, binary, Caddyfile),
-and host hardening. The wildcard certificate is retained by default to avoid
-Let's Encrypt issuance limits.
+mieru (`mita` service and package, `/etc/mieru`), and host hardening. The
+wildcard certificate is retained by default to avoid Let's Encrypt issuance
+limits.
 
 ```bash
 sudo ./setup.sh --uninstall --delete-cert
@@ -284,6 +353,7 @@ sudo DNS_RESOLVERS='9.9.9.9#dns.quad9.net 149.112.112.112#dns.quad9.net' \
 | `/etc/x-ui/install-result.env` | 3x-ui generated panel credentials, mode `600` |
 | `/etc/caddy/Caddyfile` | NaiveProxy config, present only when enabled |
 | `/etc/systemd/system/caddy.service` | NaiveProxy systemd unit, present only when enabled |
+| `/etc/mieru/server_config.json` | mieru (mita) server config, mode `600`, present only when enabled |
 | `/var/www/naiveproxy` | Shared decoy content root (NaiveProxy's `file_server` and the SNI Guard's decoy vhost) |
 | `/usr/bin/caddy` | Downloaded NaiveProxy binary |
 
