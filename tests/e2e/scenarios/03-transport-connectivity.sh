@@ -338,6 +338,7 @@ cat > /tmp/mieru-client-config.json <<EOF
   }],
   "activeProfile": "e2e",
   "socks5Port": 11085,
+  "rpcPort": 11086,
   "loggingLevel": "INFO"
 }
 EOF
