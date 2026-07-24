@@ -1,20 +1,25 @@
-# 3x-ui-cf-setup
+# proxy-swiss-knife
 
 <p align="center">
-  <img src="assets/logo.png" alt="3x-ui-cf-setup" width="192">
+  <img src="assets/logo.png" alt="proxy-swiss-knife" width="192">
 </p>
 
-![Tests](https://github.com/andletenkov/3x-ui-cf-setup/actions/workflows/tests.yml/badge.svg)
-![License](https://img.shields.io/github/license/andletenkov/3x-ui-cf-setup)
+![Tests](https://github.com/andletenkov/proxy-swiss-knife/actions/workflows/tests.yml/badge.svg)
+![License](https://img.shields.io/github/license/andletenkov/proxy-swiss-knife)
 
-Automated deployment of a 3x-ui/Xray server in one of two **mutually exclusive**
-network modes. It installs and configures 3x-ui, Nginx, wildcard TLS, UFW,
-subscriptions, routing, and optional host hardening. The mode boundary prevents
-CDN-fronted and direct transports from sharing a VPS, which could otherwise
-make the CDN origin's IP discoverable and weaken its camouflage. `no-cdn` mode
-offers four independent direct-connection transports (Reality, NaiveProxy,
-Hysteria2, mieru) that can be mixed freely with each other, since none of
-them depend on a CDN in front.
+A multi-protocol proxy setup facilitator: one script that installs and wires
+together 3x-ui/Xray, Nginx, wildcard TLS, UFW, subscriptions, routing, and
+optional host hardening, then layers on whichever transports fit your
+network situation -- CDN-fronted VLESS (WebSocket/gRPC/XHTTP) or direct
+connections (Reality, NaiveProxy, Hysteria2, mieru) -- without you having to
+hand-wire Xray configs, Nginx vhosts, or systemd units yourself.
+
+Installation is one of two **mutually exclusive** network modes. The mode
+boundary prevents CDN-fronted and direct transports from sharing a VPS,
+which could otherwise make the CDN origin's IP discoverable and weaken its
+camouflage. `no-cdn` mode offers four independent direct-connection
+transports (Reality, NaiveProxy, Hysteria2, mieru) that can be mixed freely
+with each other, since none of them depend on a CDN in front.
 
 ## Table of contents
 
@@ -114,8 +119,8 @@ Use `setup.sh` for normal operation. `harden-host.sh` can be run directly only f
 ## Install
 
 ```bash
-git clone https://github.com/andletenkov/3x-ui-cf-setup.git
-cd 3x-ui-cf-setup
+git clone https://github.com/andletenkov/proxy-swiss-knife.git
+cd proxy-swiss-knife
 chmod +x setup.sh harden-host.sh
 sudo ./setup.sh
 ```
@@ -321,7 +326,7 @@ credentials sees an ordinary decoy webpage (the same content as
 ## Update safely
 
 ```bash
-cd 3x-ui-cf-setup
+cd proxy-swiss-knife
 git pull
 sudo ./setup.sh
 ```

@@ -3443,7 +3443,7 @@ uninstall_all() {
   require_root
   load_config
 
-  echo "=== Uninstalling 3x-ui-cf-setup ==="
+  echo "=== Uninstalling proxy-swiss-knife ==="
   echo "This removes: the Nginx site/Cloudflare-real-IP config, the Certbot"
   echo "deploy hook, the Cloudflare API token file, the UFW rules this script"
   echo "added, 3x-ui itself (service, binary, /etc/x-ui, /usr/local/x-ui), and"
