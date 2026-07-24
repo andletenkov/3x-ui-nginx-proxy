@@ -16,6 +16,12 @@ setup() {
 
   # shellcheck disable=SC1090
   source "$SCRIPT"
+  # setup.sh sets `set -euo pipefail`; sourcing it leaks that into this shell
+  # (source runs in the current shell, not a subshell), which then collides
+  # with bats' own trap-based test harness: any bare (non-`run`-wrapped)
+  # failing statement in a test body silently drops the test from TAP output
+  # instead of reporting `not ok`. Undo it so tests behave predictably.
+  set +e +u +o pipefail
   INSTALL_MODE="cdn"
 
   # Reset any state that individual tests might rely on being clean.
