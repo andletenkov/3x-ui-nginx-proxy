@@ -1,3 +1,17 @@
 #!/usr/bin/env bash
-# Stub for `systemctl`. Always succeeds, does nothing.
+# Stub for `systemctl`. Always succeeds, does nothing. Optionally logs
+# invocations to $SYSTEMCTL_LOG (if set) so tests can assert on them,
+# matching the ufw stub's pattern.
+#
+#   SYSTEMCTL_SHOULD_FAIL=1  -> non-zero exit (simulates a failed unit start)
+set -eu
+
+if [[ -n "${SYSTEMCTL_LOG:-}" ]]; then
+  echo "systemctl $*" >> "$SYSTEMCTL_LOG"
+fi
+
+if [[ -n "${SYSTEMCTL_SHOULD_FAIL:-}" ]]; then
+  exit 1
+fi
+
 exit 0
